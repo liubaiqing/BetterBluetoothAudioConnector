@@ -91,3 +91,7 @@ The installer provides English and Simplified Chinese UI, destination selection,
 
 - The current build is unpackaged and self-contained; it does not install or register MSIX.
 - `Package.appxmanifest` and the development certificate remain only as migration history.
+
+## License
+
+This project is available under the [MIT License](LICENSE). You may use, copy, modify, distribute, and commercially use the software provided that the original copyright and license notice are retained. The software is provided as-is, without warranty.

@@ -134,3 +134,7 @@ artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe
 
 - 当前版本采用 unpackaged、自包含发布方式，不安装或注册 MSIX。
 - `Package.appxmanifest` 和开发证书仅作为迁移历史保留，不参与当前发布流程。
+
+## 开源许可
+
+本项目采用 [MIT License](LICENSE) 开源。你可以使用、复制、修改和分发本项目，也可以用于商业用途，但必须保留原始版权和许可声明。软件按“原样”提供，不附带任何明示或暗示的担保。
