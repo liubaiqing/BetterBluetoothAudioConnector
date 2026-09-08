@@ -8,6 +8,10 @@
 
 Better Bluetooth Audio Connector 是一款免安装、自包含的 WinUI 3 桌面应用。它可以让 Windows 电脑作为蓝牙音频接收端，将手机等已配对设备的声音传输到电脑，并通过电脑当前的耳机或扬声器播放。
 
+<p align="center">
+  <a href="https://github.com/liubaiqing/BetterBluetoothAudioConnector/releases/latest"><strong>下载最新安装包</strong></a>
+</p>
+
 ## 功能特性
 
 - 保留所有已配对且支持音频传输的设备，并显示“检查中、附近、离线、已连接或状态未知”。
@@ -28,6 +32,17 @@ Better Bluetooth Audio Connector 是一款免安装、自包含的 WinUI 3 桌�
 %LocalAppData%\BetterBluetoothAudioConnector\Logs
 ```
 
+## 下载与安装
+
+1. 打开 [Releases](https://github.com/liubaiqing/BetterBluetoothAudioConnector/releases/latest)。
+2. 下载 `BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe`。
+3. 运行安装器，选择语言和安装位置，然后点击 `Install`。
+4. 安装完成后可从开始菜单或可选的桌面快捷方式启动程序。
+
+安装器按当前用户安装，默认路径为 `%LocalAppData%\Programs\Better Bluetooth Audio Connector`，无需管理员权限。程序可以从 Windows“已安装的应用”或开始菜单中的卸载入口移除。
+
+当前发布包尚未进行代码签名，Windows 可能显示“未知发布者”或 SmartScreen 提示。请只从本项目的 GitHub Releases 页面下载，并可使用 Release 附带的 SHA-256 文件核对完整性。
+
 ## 使用要求
 
 - Windows 10 版本 2004（内部版本 19041）或更高版本。
@@ -43,7 +58,14 @@ Better Bluetooth Audio Connector 是一款免安装、自包含的 WinUI 3 桌�
 4. 点击 `Connect`，然后从手机播放音频。
 5. 如音频流长时间使用后停止，可点击 `Reconnect` 重新建立连接。
 
-分发时必须复制或压缩整个 `publish` 文件夹，不能只复制 EXE 文件。
+如果使用免安装版本，必须保留整个 `publish` 文件夹，不能只复制 EXE 文件。
+
+## 当前限制
+
+- 仅支持同时连接一个音频源设备，不提供多设备混音。
+- 不提供应用内配对，请先在 Windows 蓝牙设置中完成设备配对。
+- 设备重新进入范围时只更新状态，不会自动连接。
+- 当前仅发布 Windows x64 版本。
 
 ## 项目结构
 
@@ -85,6 +107,28 @@ BetterBluetoothAudioConnector\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64
 ```
 
 将整个目录打包给用户，解压后运行 `Better Bluetooth Audio Connector.exe` 即可。
+
+## 构建安装器
+
+安装 [Inno Setup 6](https://jrsoftware.org/isdl.php) 后运行：
+
+```powershell
+.\installer\Build-Installer.ps1
+```
+
+脚本会先生成 Release x64 自包含版本，再将整个 `publish` 目录打包为单一安装程序：
+
+```text
+artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe
+```
+
+安装器支持中英文界面、安装位置选择、开始菜单快捷方式、可选桌面快捷方式和标准卸载。默认按当前用户安装到 `%LocalAppData%\Programs\Better Bluetooth Audio Connector`，不需要管理员权限。
+
+发布其他版本号时可以指定：
+
+```powershell
+.\installer\Build-Installer.ps1 -Version 1.1.0
+```
 
 ## 说明
 

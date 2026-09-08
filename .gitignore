@@ -4,12 +4,12 @@ bin/
 obj/
 AppPackages/
 BundleArtifacts/
+artifacts/
 *.user
 *.suo
 *.nupkg
 *.snupkg
 *.pfx
-!BluetoothAudioReveicer/BluetoothAudioReveicer_TemporaryKey.pfx
 
 ## Build logs
 *.log
