@@ -1,0 +1,62 @@
+<Page
+    x:Class="Bluetooth_Audio_Reveicer.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+
+    <Grid x:Name="MainGrid" Loaded="MainGrid_Loaded">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Connection status -->
+        <StackPanel Orientation="Vertical" Margin="12,12,12,4">
+            <TextBlock x:Name="ConnectionState"
+                       Text="Idle"
+                       FontWeight="Bold"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center" />
+        </StackPanel>
+
+        <!-- Discovered audio playback devices -->
+        <ListView x:Name="DeviceListView"
+                  Grid.Row="1"
+                  Margin="12,4"
+                  SelectionChanged="DeviceListView_SelectionChanged"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,6">
+                        <SymbolIcon Symbol="Audio" Margin="0,0,10,0" />
+                        <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Action buttons -->
+        <StackPanel Orientation="Horizontal"
+                    Grid.Row="2"
+                    HorizontalAlignment="Center"
+                    Margin="12,8,12,16">
+            <Button x:Name="OpenAudioPlaybackConnectionButtonButton"
+                    Content="Open Connection"
+                    Click="OpenAudioPlaybackConnectionButtonButton_Click"
+                    IsEnabled="False"
+                    Margin="6,0"
+                    HorizontalAlignment="Center" />
+            <Button x:Name="CloseAudioPlaybackConnectionButtonButton"
+                    Content="Close Connection"
+                    Click="CloseAudioPlaybackConnectionButtonButton_Click"
+                    IsEnabled="False"
+                    Margin="6,0"
+                    HorizontalAlignment="Center" />
+        </StackPanel>
+    </Grid>
+</Page>

@@ -1,0 +1,22 @@
+## Visual Studio / MSBuild
+.vs/
+bin/
+obj/
+AppPackages/
+BundleArtifacts/
+*.user
+*.suo
+*.nupkg
+*.snupkg
+*.pfx
+!BluetoothAudioReveicer/BluetoothAudioReveicer_TemporaryKey.pfx
+
+## Build logs
+*.log
+*.binlog
+*.etl
+
+## Test results
+TestResults/
+*.coverage
+*.trx
