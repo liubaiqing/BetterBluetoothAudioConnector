@@ -1,22 +1,79 @@
 ## Visual Studio / MSBuild
 .vs/
+.idea/
+.vscode/
+_ReSharper*/
 bin/
 obj/
 AppPackages/
 BundleArtifacts/
+Generated Files/
+publish/
+packages/
 artifacts/
 *.user
 *.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
 *.nupkg
 *.snupkg
+
+## Signing material and local secrets
 *.pfx
+*.p12
+*.pem
+*.key
+*.snk
+*.jks
+*.keystore
+*.secrets.json
+secrets.json
+credentials.json
+*.credentials.json
+.env
+.env.*
+!.env.example
+!.env.template
+appsettings.Local.json
+appsettings.*.local.json
+
+## Generated Windows packages
+*.appx
+*.appxbundle
+*.appxupload
+*.msix
+*.msixbundle
+*.msixupload
+*.cer
 
 ## Build logs
 *.log
 *.binlog
 *.etl
+*.dmp
+*.dump
 
 ## Test results
 TestResults/
+coverage/
+coverage.*
 *.coverage
+*.coveragexml
 *.trx
+
+## OS and temporary files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+.cache/
+tmp/
+temp/

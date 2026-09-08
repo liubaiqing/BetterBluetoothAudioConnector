@@ -2,6 +2,14 @@
 
 All notable changes to Better Bluetooth Audio Connector are documented here.
 
+## [1.0.1] - 2026-09-08
+
+### Changed
+
+- Licensed the project under the MIT License.
+- Included the license file in portable publish output and installed application files.
+- Expanded Git ignore rules for signing material, local secrets, Windows packages, editor state, temporary files, crash dumps, coverage output, and build caches.
+
 ## [1.0.0] - 2026-09-08
 
 First public release.

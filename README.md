@@ -35,7 +35,7 @@ Better Bluetooth Audio Connector 是一款免安装、自包含的 WinUI 3 桌�
 ## 下载与安装
 
 1. 打开 [Releases](https://github.com/liubaiqing/BetterBluetoothAudioConnector/releases/latest)。
-2. 下载 `BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe`。
+2. 下载 `BetterBluetoothAudioConnector-Setup-1.0.1-x64.exe`。
 3. 运行安装器，选择语言和安装位置，然后点击 `Install`。
 4. 安装完成后可从开始菜单或可选的桌面快捷方式启动程序。
 
@@ -119,7 +119,7 @@ BetterBluetoothAudioConnector\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64
 脚本会先生成 Release x64 自包含版本，再将整个 `publish` 目录打包为单一安装程序：
 
 ```text
-artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe
+artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.1-x64.exe
 ```
 
 安装器支持中英文界面、安装位置选择、开始菜单快捷方式、可选桌面快捷方式和标准卸载。默认按当前用户安装到 `%LocalAppData%\Programs\Better Bluetooth Audio Connector`，不需要管理员权限。

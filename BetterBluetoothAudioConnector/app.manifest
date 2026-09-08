@@ -2,7 +2,7 @@
 <assembly manifestVersion="1.0"
           xmlns="urn:schemas-microsoft-com:asm.v1"
           xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <assemblyIdentity version="1.0.0.0" name="BetterBluetoothAudioConnector" />
+  <assemblyIdentity version="1.0.1.0" name="BetterBluetoothAudioConnector" />
   <asmv3:application>
     <asmv3:windowsSettings>
       <!-- Windows Vista through 8.1 fallback. -->

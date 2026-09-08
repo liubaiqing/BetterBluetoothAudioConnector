@@ -27,7 +27,7 @@ An unpackaged, self-contained WinUI 3 desktop app that turns a Windows PC into a
 ## Download and install
 
 1. Open the [latest release](https://github.com/liubaiqing/BetterBluetoothAudioConnector/releases/latest).
-2. Download `BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe`.
+2. Download `BetterBluetoothAudioConnector-Setup-1.0.1-x64.exe`.
 3. Run the installer, choose the language and destination, and select `Install`.
 4. Launch the app from the Start Menu or the optional desktop shortcut.
 
@@ -82,7 +82,7 @@ After installing [Inno Setup 6](https://jrsoftware.org/isdl.php), run:
 The script publishes the self-contained Release x64 build and packages the complete `publish` directory into:
 
 ```text
-artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.0-x64.exe
+artifacts\installer\BetterBluetoothAudioConnector-Setup-1.0.1-x64.exe
 ```
 
 The installer provides English and Simplified Chinese UI, destination selection, a Start Menu shortcut, an optional desktop shortcut, and standard uninstall support. To build another version, pass `-Version 1.1.0`.
