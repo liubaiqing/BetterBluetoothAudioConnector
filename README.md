@@ -1,46 +1,84 @@
-# Bluetooth Audio Receiver (Reveicer)
+# Better Bluetooth Audio Connector
 
-A UWP app that turns a Windows PC into a Bluetooth audio receiver. Connect your phone to the PC over Bluetooth and hear the phone's audio through the PC's default output device (headphones/speakers) alongside PC audio.
+An unpackaged, self-contained WinUI 3 desktop app that turns a Windows PC into a Bluetooth audio receiver. Connect your phone to the PC over Bluetooth and hear the phone's audio through the PC's default output device (headphones/speakers) alongside PC audio.
 
 ## Features
 
-- Enumerates nearby Bluetooth devices that support `Windows.Media.Audio.AudioPlaybackConnection`.
-- Opens / closes an audio playback connection from the selected device.
-- Shows connection state: `Idle`, `Connecting...`, `Connected`, `Disconnected`.
+- Keeps paired audio-capable devices in the list and marks them as checking,
+  nearby, offline, connected, or unknown.
+- Opens / closes an audio playback connection from the selected device, with
+  cancellable 5-second Start and 10-second Open stages.
+- Retries transient connection failures once with a fresh connection object.
+- Cancels the underlying WinRT operation and isolates late completion results,
+  so a timed-out request cannot revive an obsolete connection.
+- Releases stale connections when devices go offline or the desktop window closes,
+  and automatically restarts device watchers after Bluetooth radio interruptions.
+- Keeps the receiver alive while the window is minimized; WinUI 3 desktop apps
+  are not automatically suspended by the UWP process-lifecycle manager.
+- Exposes play/pause state through desktop-compatible system media controls.
+- Provides an in-app reconnect action for recovering a stalled audio stream
+  without resetting the Windows Bluetooth radio.
+- Opens with a compact 360 x 320 DIP client area and scales correctly for the
+  active monitor DPI; the minimum window size is 340 x 280 DIP.
+- Shows connection and watcher state, changes Disconnect to Cancel while connecting,
+  and provides a shortcut to the diagnostic log folder.
+- Writes privacy-preserving diagnostic logs to
+  `%LocalAppData%\BetterBluetoothAudioConnector\Logs`, retaining seven days.
 
 ## Project layout
 
 ```
-BluetoothAudioReveicer.sln
-NuGet.Config                       # offline fallback to local UWP SDK packages
-BluetoothAudioReveicer/
-  BluetoothAudioReveicer.csproj    # classic UWP C# project (.NET Native 2.2)
-  Package.appxmanifest             # Bluetooth capability, Windows 10 19041
+BetterBluetoothAudioConnector.sln
+NuGet.Config                       # nuget.org source for Windows App SDK restore
+BetterBluetoothAudioConnector/
+  BetterBluetoothAudioConnector.csproj # SDK-style .NET 8 + WinUI 3 project
+  app.manifest                     # Win32 compatibility declaration
   App.xaml / App.xaml.cs
-  MainPage.xaml / MainPage.xaml.cs # device watcher + AudioPlaybackConnection logic
+  MainPage.xaml / MainPage.xaml.cs # WinUI window and event forwarding only
+  Models/                          # immutable device/connection snapshots
+  ViewModels/                      # UI state and commands
+  Services/                        # watchers, connection state machine, cancellation
+  Diagnostics/                     # asynchronous rotating diagnostic logs
   Properties/
     AssemblyInfo.cs
-    Default.rd.xml
   Assets/                          # app logos/splash
 ```
 
 ## Requirements
 
-- Windows 10 SDK 10.0.19041.0 or newer.
-- Visual Studio 2019/2022 with the **Universal Windows Platform development** workload, or MSBuild with the same components.
-- NuGet restore works offline through the local fallback folder configured in `NuGet.Config`.
+- Windows 10 version 2004 (build 19041) or newer, x64.
+- .NET 8 SDK and Visual Studio 2022 with Windows application development tools
+  are required only for development.
+- Internet access for the first Windows App SDK package restore.
+- Target PCs do not need MSIX, .NET, or a separately installed Windows App SDK.
 
 ## Build
 
 From the repo root:
 
-```bat
-"E:\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" BluetoothAudioReveicer.sln /t:Restore,Build /p:Configuration=Debug /p:Platform=x64
+```powershell
+dotnet restore .\BetterBluetoothAudioConnector.sln
+dotnet build .\BetterBluetoothAudioConnector.sln --configuration Debug --no-restore
+dotnet test .\BetterBluetoothAudioConnector.Tests\BetterBluetoothAudioConnector.Tests.csproj --configuration Debug --no-restore -p:Platform=x64
 ```
 
-Or open `BluetoothAudioReveicer.sln` in Visual Studio and build.
+To publish the directly runnable folder:
+
+```powershell
+dotnet publish .\BetterBluetoothAudioConnector\BetterBluetoothAudioConnector.csproj --configuration Release --no-restore -p:Platform=x64
+```
+
+The output folder is:
+
+```text
+BetterBluetoothAudioConnector\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish
+```
+
+Copy the entire folder to the target PC and run `Better Bluetooth Audio Connector.exe`.
+The DLL and runtime files beside the executable are required and must remain in
+the same folder. No installation or package registration is performed.
 
 ## Notes
 
-- The original installed package used the misspelled name `Bluetooth Audio Reveicer`; this source tree intentionally keeps that spelling for compatibility.
-- The `.pfx` in the project is a locally generated development signing certificate (`BluetoothAudioReveicer_TemporaryKey.pfx`, password `BluetoothAudioReveicer123!`). Replace it before publishing.
+- `Package.appxmanifest` and the development certificate remain only as migration
+  history; the current build is unpackaged and does not sign or install MSIX.
