@@ -1,84 +1,92 @@
 # Better Bluetooth Audio Connector
 
-An unpackaged, self-contained WinUI 3 desktop app that turns a Windows PC into a Bluetooth audio receiver. Connect your phone to the PC over Bluetooth and hear the phone's audio through the PC's default output device (headphones/speakers) alongside PC audio.
+简体中文 | [English](README_EN.md)
 
-## Features
+<p align="center">
+  <img src="BetterBluetoothAudioConnector/Assets/BetterBluetoothAudioConnector-Source.png" width="128" alt="Better Bluetooth Audio Connector 图标">
+</p>
 
-- Keeps paired audio-capable devices in the list and marks them as checking,
-  nearby, offline, connected, or unknown.
-- Opens / closes an audio playback connection from the selected device, with
-  cancellable 5-second Start and 10-second Open stages.
-- Retries transient connection failures once with a fresh connection object.
-- Cancels the underlying WinRT operation and isolates late completion results,
-  so a timed-out request cannot revive an obsolete connection.
-- Releases stale connections when devices go offline or the desktop window closes,
-  and automatically restarts device watchers after Bluetooth radio interruptions.
-- Keeps the receiver alive while the window is minimized; WinUI 3 desktop apps
-  are not automatically suspended by the UWP process-lifecycle manager.
-- Exposes play/pause state through desktop-compatible system media controls.
-- Provides an in-app reconnect action for recovering a stalled audio stream
-  without resetting the Windows Bluetooth radio.
-- Opens with a compact 360 x 320 DIP client area and scales correctly for the
-  active monitor DPI; the minimum window size is 340 x 280 DIP.
-- Shows connection and watcher state, changes Disconnect to Cancel while connecting,
-  and provides a shortcut to the diagnostic log folder.
-- Writes privacy-preserving diagnostic logs to
-  `%LocalAppData%\BetterBluetoothAudioConnector\Logs`, retaining seven days.
+Better Bluetooth Audio Connector 是一款免安装、自包含的 WinUI 3 桌面应用。它可以让 Windows 电脑作为蓝牙音频接收端，将手机等已配对设备的声音传输到电脑，并通过电脑当前的耳机或扬声器播放。
 
-## Project layout
+## 功能特性
 
+- 保留所有已配对且支持音频传输的设备，并显示“检查中、附近、离线、已连接或状态未知”。
+- 维持单设备连接，支持连接、断开、取消连接和重新连接。
+- Start 和 Open 阶段分别具有 5 秒和 10 秒超时，并支持真正取消底层 WinRT 操作。
+- 瞬时连接失败时自动重试一次，而且每次尝试都会创建全新的连接对象。
+- 隔离超时或取消后的晚到结果，避免已经失效的请求重新恢复为已连接状态。
+- 设备持续离线两秒后释放陈旧连接；设备重新上线时只更新状态，不会自动连接。
+- 蓝牙 watcher 异常停止后自动退避重启，关闭再开启电脑蓝牙时无需重启程序。
+- 使用 WinUI 3 桌面生命周期，窗口最小化后不会受到 UWP 自动挂起限制。
+- 支持系统媒体播放/暂停控制，以及应用内手动恢复音频流。
+- 提供紧凑界面、Per-Monitor V2 DPI 缩放和清晰的高分辨率字体。
+- 提供隐私保护的诊断日志，日志保留 7 天，可通过界面的 `Open Logs` 按钮打开。
+
+日志目录：
+
+```text
+%LocalAppData%\BetterBluetoothAudioConnector\Logs
 ```
+
+## 使用要求
+
+- Windows 10 版本 2004（内部版本 19041）或更高版本。
+- 64 位 x64 系统。
+- 手机等音频源设备需要先在 Windows 蓝牙设置中完成配对。
+- 发布版本已经包含 .NET 8 和 Windows App SDK 运行库，目标电脑不需要安装 MSIX 或额外运行环境。
+
+## 使用方法
+
+1. 在 Windows 蓝牙设置中配对手机或其他音频设备。
+2. 启动 `Better Bluetooth Audio Connector.exe`。
+3. 在设备列表中选择状态为 `Nearby` 或 `Unknown` 的设备。
+4. 点击 `Connect`，然后从手机播放音频。
+5. 如音频流长时间使用后停止，可点击 `Reconnect` 重新建立连接。
+
+分发时必须复制或压缩整个 `publish` 文件夹，不能只复制 EXE 文件。
+
+## 项目结构
+
+```text
 BetterBluetoothAudioConnector.sln
-NuGet.Config                       # nuget.org source for Windows App SDK restore
+NuGet.Config
 BetterBluetoothAudioConnector/
-  BetterBluetoothAudioConnector.csproj # SDK-style .NET 8 + WinUI 3 project
-  app.manifest                     # Win32 compatibility declaration
-  App.xaml / App.xaml.cs
-  MainPage.xaml / MainPage.xaml.cs # WinUI window and event forwarding only
-  Models/                          # immutable device/connection snapshots
-  ViewModels/                      # UI state and commands
-  Services/                        # watchers, connection state machine, cancellation
-  Diagnostics/                     # asynchronous rotating diagnostic logs
-  Properties/
-    AssemblyInfo.cs
-  Assets/                          # app logos/splash
+  BetterBluetoothAudioConnector.csproj
+  App.xaml / App.xaml.cs           # 应用创建和生命周期
+  MainPage.xaml / MainPage.xaml.cs # WinUI 窗口及事件转发
+  Models/                          # 设备和连接状态快照
+  ViewModels/                      # 界面状态与命令
+  Services/                        # watcher、连接状态机和取消逻辑
+  Diagnostics/                     # 异步轮转诊断日志
+  Assets/                          # 应用图标和视觉资源
+BetterBluetoothAudioConnector.Tests/
 ```
 
-## Requirements
+## 构建与测试
 
-- Windows 10 version 2004 (build 19041) or newer, x64.
-- .NET 8 SDK and Visual Studio 2022 with Windows application development tools
-  are required only for development.
-- Internet access for the first Windows App SDK package restore.
-- Target PCs do not need MSIX, .NET, or a separately installed Windows App SDK.
-
-## Build
-
-From the repo root:
+需要 .NET 8 SDK，以及包含 Windows 应用开发工具的 Visual Studio 2022。
 
 ```powershell
 dotnet restore .\BetterBluetoothAudioConnector.sln
-dotnet build .\BetterBluetoothAudioConnector.sln --configuration Debug --no-restore
+dotnet build .\BetterBluetoothAudioConnector.sln --configuration Debug --no-restore -p:Platform=x64
 dotnet test .\BetterBluetoothAudioConnector.Tests\BetterBluetoothAudioConnector.Tests.csproj --configuration Debug --no-restore -p:Platform=x64
 ```
 
-To publish the directly runnable folder:
+## 发布免安装版本
 
 ```powershell
 dotnet publish .\BetterBluetoothAudioConnector\BetterBluetoothAudioConnector.csproj --configuration Release --no-restore -p:Platform=x64
 ```
 
-The output folder is:
+输出目录：
 
 ```text
 BetterBluetoothAudioConnector\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish
 ```
 
-Copy the entire folder to the target PC and run `Better Bluetooth Audio Connector.exe`.
-The DLL and runtime files beside the executable are required and must remain in
-the same folder. No installation or package registration is performed.
+将整个目录打包给用户，解压后运行 `Better Bluetooth Audio Connector.exe` 即可。
 
-## Notes
+## 说明
 
-- `Package.appxmanifest` and the development certificate remain only as migration
-  history; the current build is unpackaged and does not sign or install MSIX.
+- 当前版本采用 unpackaged、自包含发布方式，不安装或注册 MSIX。
+- `Package.appxmanifest` 和开发证书仅作为迁移历史保留，不参与当前发布流程。
