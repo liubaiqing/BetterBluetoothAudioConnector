@@ -18,6 +18,12 @@
         </Grid.RowDefinitions>
 
         <Grid Margin="10,8,10,4">
+            <TextBlock Text="{x:Bind VersionText, Mode=OneTime}"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Top"
+                       Margin="0,2,0,0"
+                       FontSize="11"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <StackPanel HorizontalAlignment="Center" Margin="34,0">
                 <TextBlock Text="{x:Bind ViewModel.ConnectionStatusText, Mode=OneWay}"
                            FontWeight="Bold"

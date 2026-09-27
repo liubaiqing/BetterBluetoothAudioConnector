@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="BetterBluetoothAudioConnector"
             Publisher="CN=BetterBluetoothAudioConnector"
-            Version="1.0.2.0"
+            Version="1.0.3.0"
             ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Better Bluetooth Audio Connector</DisplayName>

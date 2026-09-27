@@ -39,6 +39,8 @@ namespace BetterBluetoothAudioConnector
 
         public MainViewModel ViewModel { get; }
 
+        public string VersionText { get; } = GetVersionText();
+
         private void MainGrid_Loaded(object sender, RoutedEventArgs e)
         {
             if (isLoaded)
@@ -206,6 +208,14 @@ namespace BetterBluetoothAudioConnector
         private static int ScaleToPixels(int dips, double scale)
         {
             return (int)Math.Ceiling(dips * scale);
+        }
+
+        private static string GetVersionText()
+        {
+            Version version = typeof(MainPage).Assembly.GetName().Version;
+            return version == null
+                ? string.Empty
+                : $"v{version.Major}.{version.Minor}.{version.Build}";
         }
 
         [DllImport("user32.dll")]
