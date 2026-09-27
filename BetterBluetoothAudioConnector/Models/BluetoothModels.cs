@@ -15,6 +15,7 @@ namespace BetterBluetoothAudioConnector.Models
     {
         Idle,
         Connecting,
+        Recovering,
         Connected,
         Canceling,
         Disconnecting,
@@ -40,7 +41,8 @@ namespace BetterBluetoothAudioConnector.Models
             string name,
             DeviceAvailability availability,
             bool isSystemConnected,
-            bool isAudioConnected)
+            bool isAudioConnected,
+            bool? isConnectable = null)
         {
             Id = id;
             ContainerId = containerId;
@@ -48,6 +50,8 @@ namespace BetterBluetoothAudioConnector.Models
             Availability = availability;
             IsSystemConnected = isSystemConnected;
             IsAudioConnected = isAudioConnected;
+            IsConnectable = isConnectable ??
+                availability != DeviceAvailability.Offline;
         }
 
         public string Id { get; }
@@ -61,6 +65,8 @@ namespace BetterBluetoothAudioConnector.Models
         public bool IsSystemConnected { get; }
 
         public bool IsAudioConnected { get; }
+
+        public bool IsConnectable { get; }
     }
 
     public sealed class ConnectionSnapshot

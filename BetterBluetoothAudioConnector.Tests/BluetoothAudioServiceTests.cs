@@ -14,7 +14,7 @@ namespace BetterBluetoothAudioConnector.Tests
     public sealed class BluetoothAudioServiceTests
     {
         [TestMethod]
-        public async Task StartTimeoutCancelsOperationAndDisposesConnection()
+        public async Task StartTimeoutDisposesOnlyAfterLateOperationDrains()
         {
             FakeCancelableOperation start = new FakeCancelableOperation();
             FakeAudioConnection connection = new FakeAudioConnection(
@@ -33,8 +33,11 @@ namespace BetterBluetoothAudioConnector.Tests
             await service.ConnectAsync("device-1").WaitAsync(TimeSpan.FromSeconds(1));
 
             Assert.AreEqual(1, start.CancelCount);
-            Assert.IsTrue(connection.IsDisposed);
+            Assert.IsFalse(connection.IsDisposed);
             Assert.AreEqual(AudioConnectionState.TimedOut, service.CurrentConnection.State);
+
+            start.Complete();
+            await WaitUntilAsync(() => connection.IsDisposed);
         }
 
         [TestMethod]
@@ -61,10 +64,13 @@ namespace BetterBluetoothAudioConnector.Tests
 
             Assert.AreEqual(1, start.CancelCount);
             Assert.AreEqual(1, factory.CreateCount);
-            Assert.IsTrue(connection.IsDisposed);
+            Assert.IsFalse(connection.IsDisposed);
             Assert.AreEqual(
                 AudioConnectionState.Disconnected,
                 service.CurrentConnection.State);
+
+            start.Complete();
+            await WaitUntilAsync(() => connection.IsDisposed);
         }
 
         [TestMethod]
@@ -92,17 +98,15 @@ namespace BetterBluetoothAudioConnector.Tests
         }
 
         [TestMethod]
-        public async Task RetryCreatesFreshConnectionAndCanSucceed()
+        public async Task RetryReusesEnabledConnectionAndCanSucceed()
         {
-            FakeAudioConnection first = new FakeAudioConnection(
+            FakeAudioConnection connection = new FakeAudioConnection(
                 FakeCancelableOperation.Completed(),
                 FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
-                    AudioPlaybackConnectionOpenResultStatus.RequestTimedOut));
-            FakeAudioConnection second = new FakeAudioConnection(
-                FakeCancelableOperation.Completed(),
+                    AudioPlaybackConnectionOpenResultStatus.RequestTimedOut),
                 FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
                     AudioPlaybackConnectionOpenResultStatus.Success));
-            FakeConnectionFactory factory = new FakeConnectionFactory(first, second);
+            FakeConnectionFactory factory = new FakeConnectionFactory(connection);
             using BluetoothAudioService service = CreateService(
                 factory,
                 new ConnectionPolicy(
@@ -113,10 +117,180 @@ namespace BetterBluetoothAudioConnector.Tests
 
             await service.ConnectAsync("device-1").WaitAsync(TimeSpan.FromSeconds(1));
 
-            Assert.AreEqual(2, factory.CreateCount);
-            Assert.IsTrue(first.IsDisposed);
-            Assert.IsFalse(second.IsDisposed);
+            Assert.AreEqual(1, factory.CreateCount);
+            Assert.AreEqual(1, connection.StartCallCount);
+            Assert.AreEqual(2, connection.OpenCallCount);
+            Assert.IsFalse(connection.IsDisposed);
             Assert.AreEqual(AudioConnectionState.Connected, service.CurrentConnection.State);
+        }
+
+        [TestMethod]
+        public async Task TimedOutOpenMustDrainBeforeSecondOpenStarts()
+        {
+            FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus> firstOpen =
+                new FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>();
+            FakeAudioConnection connection = new FakeAudioConnection(
+                FakeCancelableOperation.Completed(),
+                firstOpen,
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.Success));
+            using BluetoothAudioService service = CreateService(
+                new FakeConnectionFactory(connection),
+                new ConnectionPolicy(
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromMilliseconds(25),
+                    TimeSpan.Zero,
+                    2,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero));
+
+            Task connectTask = service.ConnectAsync("device-1");
+            await WaitUntilAsync(() => firstOpen.CancelCount == 1);
+            Assert.AreEqual(1, connection.OpenCallCount);
+
+            firstOpen.Complete(AudioPlaybackConnectionOpenResultStatus.UnknownFailure);
+            await connectTask.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Assert.AreEqual(2, connection.OpenCallCount);
+            Assert.AreEqual(AudioConnectionState.Connected, service.CurrentConnection.State);
+        }
+
+        [TestMethod]
+        public async Task NewSessionCannotCreateConnectionUntilCanceledStartDrains()
+        {
+            FakeCancelableOperation firstStart = new FakeCancelableOperation();
+            FakeAudioConnection first = new FakeAudioConnection(
+                firstStart,
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.Success));
+            FakeAudioConnection second = new FakeAudioConnection(
+                FakeCancelableOperation.Completed(),
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.Success));
+            FakeConnectionFactory factory = new FakeConnectionFactory(first, second);
+            using BluetoothAudioService service = CreateService(
+                factory,
+                new ConnectionPolicy(
+                    TimeSpan.FromSeconds(5),
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero,
+                    1,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero));
+
+            Task firstSession = service.ConnectAsync("device-1");
+            await WaitUntilAsync(() => first.StartCallCount == 1);
+            service.CancelCurrentOperation();
+            await firstSession.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Task secondSession = service.ConnectAsync("device-1");
+            await Task.Delay(40);
+            Assert.AreEqual(1, factory.CreateCount);
+
+            firstStart.Complete();
+            await secondSession.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Assert.AreEqual(2, factory.CreateCount);
+            Assert.AreEqual(AudioConnectionState.Connected, service.CurrentConnection.State);
+        }
+
+        [TestMethod]
+        public async Task ClosedDuringPendingOpenCannotPublishGhostConnected()
+        {
+            FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus> open =
+                new FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>();
+            FakeAudioConnection connection = new FakeAudioConnection(
+                FakeCancelableOperation.Completed(),
+                open);
+            using BluetoothAudioService service = CreateService(
+                new FakeConnectionFactory(connection),
+                new ConnectionPolicy(
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero,
+                    1,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromMilliseconds(10)));
+
+            Task connectTask = service.ConnectAsync("device-1");
+            await WaitUntilAsync(() => connection.OpenCallCount == 1);
+            connection.State = AudioPlaybackConnectionState.Closed;
+            connection.RaiseStateChanged();
+            open.Complete(AudioPlaybackConnectionOpenResultStatus.Success);
+            await connectTask.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Assert.AreEqual(AudioConnectionState.Failed, service.CurrentConnection.State);
+            Assert.IsFalse(connection.IsDisposed);
+        }
+
+        [TestMethod]
+        public async Task NativeClosedKeepsEnabledConnectionForRecovery()
+        {
+            FakeAudioConnection connection = new FakeAudioConnection(
+                FakeCancelableOperation.Completed(),
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.Success));
+            using BluetoothAudioService service = CreateService(
+                new FakeConnectionFactory(connection),
+                new ConnectionPolicy(
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero,
+                    1,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero));
+
+            await service.ConnectAsync("device-1");
+            connection.State = AudioPlaybackConnectionState.Closed;
+            connection.RaiseStateChanged();
+
+            Assert.AreEqual(AudioConnectionState.Disconnected, service.CurrentConnection.State);
+            Assert.IsFalse(connection.IsDisposed);
+        }
+
+        [TestMethod]
+        public async Task LaterConnectReusesLeaseAfterPreviousOpenFailure()
+        {
+            FakeAudioConnection connection = new FakeAudioConnection(
+                FakeCancelableOperation.Completed(),
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.UnknownFailure),
+                FakeCancelableOperation<AudioPlaybackConnectionOpenResultStatus>.Completed(
+                    AudioPlaybackConnectionOpenResultStatus.Success));
+            FakeConnectionFactory factory = new FakeConnectionFactory(connection);
+            using BluetoothAudioService service = CreateService(
+                factory,
+                new ConnectionPolicy(
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero,
+                    1,
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.Zero));
+
+            await service.ConnectAsync("device-1");
+            Assert.AreEqual(AudioConnectionState.Failed, service.CurrentConnection.State);
+
+            await service.ConnectAsync("device-1");
+
+            Assert.AreEqual(1, factory.CreateCount);
+            Assert.AreEqual(1, connection.StartCallCount);
+            Assert.AreEqual(2, connection.OpenCallCount);
+            Assert.AreEqual(AudioConnectionState.Connected, service.CurrentConnection.State);
+        }
+
+        private static async Task WaitUntilAsync(Func<bool> predicate)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(1);
+            while (!predicate())
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    Assert.Fail("Timed out waiting for the expected test state.");
+                }
+
+                await Task.Delay(10);
+            }
         }
 
         private static BluetoothAudioService CreateService(
@@ -161,15 +335,16 @@ namespace BetterBluetoothAudioConnector.Tests
 
     internal sealed class FakeAudioConnection : IAudioConnection
     {
-        private readonly ICancelableOperation start;
-        private readonly ICancelableOperation<AudioPlaybackConnectionOpenResultStatus> open;
+        private readonly Queue<ICancelableOperation> starts;
+        private readonly Queue<ICancelableOperation<AudioPlaybackConnectionOpenResultStatus>> opens;
 
         public FakeAudioConnection(
             ICancelableOperation start,
-            ICancelableOperation<AudioPlaybackConnectionOpenResultStatus> open)
+            params ICancelableOperation<AudioPlaybackConnectionOpenResultStatus>[] opens)
         {
-            this.start = start;
-            this.open = open;
+            starts = new Queue<ICancelableOperation>(new[] { start });
+            this.opens = new Queue<ICancelableOperation<AudioPlaybackConnectionOpenResultStatus>>(
+                opens);
         }
 
         public event EventHandler StateChanged;
@@ -179,9 +354,21 @@ namespace BetterBluetoothAudioConnector.Tests
 
         public bool IsDisposed { get; private set; }
 
-        public ICancelableOperation StartAsync() => start;
+        public int StartCallCount { get; private set; }
 
-        public ICancelableOperation<AudioPlaybackConnectionOpenResultStatus> OpenAsync() => open;
+        public int OpenCallCount { get; private set; }
+
+        public ICancelableOperation StartAsync()
+        {
+            StartCallCount++;
+            return starts.Peek();
+        }
+
+        public ICancelableOperation<AudioPlaybackConnectionOpenResultStatus> OpenAsync()
+        {
+            OpenCallCount++;
+            return opens.Count > 1 ? opens.Dequeue() : opens.Peek();
+        }
 
         public void Dispose()
         {
@@ -246,6 +433,11 @@ namespace BetterBluetoothAudioConnector.Tests
             FakeCancelableOperation<T> operation = new FakeCancelableOperation<T>();
             operation.completion.TrySetResult(value);
             return operation;
+        }
+
+        public void Complete(T value)
+        {
+            completion.TrySetResult(value);
         }
 
         public void Cancel()

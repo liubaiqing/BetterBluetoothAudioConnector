@@ -142,20 +142,26 @@ namespace BetterBluetoothAudioConnector.Services
     {
         public static ConnectionPolicy Default { get; } = new ConnectionPolicy(
             TimeSpan.FromSeconds(5),
-            TimeSpan.FromSeconds(10),
-            TimeSpan.FromMilliseconds(500),
-            2);
+            TimeSpan.FromSeconds(15),
+            TimeSpan.FromSeconds(1),
+            3,
+            TimeSpan.FromSeconds(20),
+            TimeSpan.FromMilliseconds(350));
 
         public ConnectionPolicy(
             TimeSpan startTimeout,
             TimeSpan openTimeout,
             TimeSpan retryDelay,
-            int maximumAttempts)
+            int maximumAttempts,
+            TimeSpan? operationDrainTimeout = null,
+            TimeSpan? openStabilityDelay = null)
         {
             StartTimeout = startTimeout;
             OpenTimeout = openTimeout;
             RetryDelay = retryDelay;
             MaximumAttempts = maximumAttempts;
+            OperationDrainTimeout = operationDrainTimeout ?? TimeSpan.FromSeconds(15);
+            OpenStabilityDelay = openStabilityDelay ?? TimeSpan.FromMilliseconds(100);
         }
 
         public TimeSpan StartTimeout { get; }
@@ -165,5 +171,18 @@ namespace BetterBluetoothAudioConnector.Services
         public TimeSpan RetryDelay { get; }
 
         public int MaximumAttempts { get; }
+
+        public TimeSpan OperationDrainTimeout { get; }
+
+        public TimeSpan OpenStabilityDelay { get; }
+
+        public TimeSpan GetRetryDelay(int completedAttempt)
+        {
+            double multiplier = Math.Pow(2, Math.Max(0, completedAttempt - 1));
+            double milliseconds = Math.Min(
+                RetryDelay.TotalMilliseconds * multiplier,
+                TimeSpan.FromSeconds(5).TotalMilliseconds);
+            return TimeSpan.FromMilliseconds(milliseconds);
+        }
     }
 }

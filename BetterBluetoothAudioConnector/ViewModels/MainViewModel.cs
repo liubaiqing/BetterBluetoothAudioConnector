@@ -21,6 +21,7 @@ namespace BetterBluetoothAudioConnector.ViewModels
         private DeviceItemViewModel selectedDevice;
         private ConnectionSnapshot connection = ConnectionSnapshot.Idle;
         private string watcherStatusText = "Preparing device monitoring...";
+        private DeviceWatcherState watcherState = DeviceWatcherState.Searching;
         private bool disposed;
 
         public MainViewModel(
@@ -74,6 +75,7 @@ namespace BetterBluetoothAudioConnector.ViewModels
         {
             AudioConnectionState.Idle => "Idle",
             AudioConnectionState.Connecting => BuildConnectingText(),
+            AudioConnectionState.Recovering => "Recovering Bluetooth audio...",
             AudioConnectionState.Connected => "Connected",
             AudioConnectionState.Canceling => "Canceling...",
             AudioConnectionState.Disconnecting => "Disconnecting...",
@@ -101,14 +103,17 @@ namespace BetterBluetoothAudioConnector.ViewModels
 
         public bool CanConnect =>
             SelectedDevice != null &&
-            SelectedDevice.Availability != DeviceAvailability.Offline &&
+            SelectedDevice.IsConnectable &&
+            watcherState == DeviceWatcherState.Ready &&
             connection.State != AudioConnectionState.Connecting &&
+            connection.State != AudioConnectionState.Recovering &&
             connection.State != AudioConnectionState.Canceling &&
             connection.State != AudioConnectionState.Disconnecting &&
             connection.State != AudioConnectionState.Connected;
 
         public bool CanDisconnect =>
             connection.State == AudioConnectionState.Connecting ||
+            connection.State == AudioConnectionState.Recovering ||
             connection.State == AudioConnectionState.Connected;
 
         public bool CanReconnect =>
@@ -118,11 +123,13 @@ namespace BetterBluetoothAudioConnector.ViewModels
 
         public bool CanSelectDevice =>
             connection.State != AudioConnectionState.Connecting &&
+            connection.State != AudioConnectionState.Recovering &&
             connection.State != AudioConnectionState.Canceling &&
             connection.State != AudioConnectionState.Disconnecting;
 
         public string DisconnectButtonText =>
             connection.State == AudioConnectionState.Connecting ||
+            connection.State == AudioConnectionState.Recovering ||
             connection.State == AudioConnectionState.Canceling
                 ? "Cancel"
                 : "Disconnect";
@@ -143,7 +150,8 @@ namespace BetterBluetoothAudioConnector.ViewModels
 
         public async Task DisconnectOrCancelAsync()
         {
-            if (connection.State == AudioConnectionState.Connecting)
+            if (connection.State == AudioConnectionState.Connecting ||
+                connection.State == AudioConnectionState.Recovering)
             {
                 service.CancelCurrentOperation();
             }
@@ -211,7 +219,12 @@ namespace BetterBluetoothAudioConnector.ViewModels
             object sender,
             WatcherStateChangedEventArgs args)
         {
-            Enqueue(() => WatcherStatusText = args.Message);
+            Enqueue(() =>
+            {
+                watcherState = args.State;
+                WatcherStatusText = args.Message;
+                RaiseCommandProperties();
+            });
         }
 
         private void ApplyDevices(IReadOnlyList<BluetoothDeviceSnapshot> snapshots)
@@ -338,6 +351,8 @@ namespace BetterBluetoothAudioConnector.ViewModels
 
         public DeviceAvailability Availability => snapshot.Availability;
 
+        public bool IsConnectable => snapshot.IsConnectable;
+
         public string StatusText
         {
             get
@@ -347,16 +362,24 @@ namespace BetterBluetoothAudioConnector.ViewModels
                     return "Connected";
                 }
 
+                if (snapshot.Availability == DeviceAvailability.Checking)
+                {
+                    return "Checking...";
+                }
+
+                if (snapshot.Availability == DeviceAvailability.Offline)
+                {
+                    return "Offline";
+                }
+
                 if (snapshot.IsSystemConnected)
                 {
-                    return "Bluetooth connected";
+                    return "Windows Bluetooth link active";
                 }
 
                 return snapshot.Availability switch
                 {
-                    DeviceAvailability.Checking => "Checking...",
                     DeviceAvailability.Nearby => "Nearby",
-                    DeviceAvailability.Offline => "Offline",
                     _ => "Status unknown"
                 };
             }
@@ -368,6 +391,7 @@ namespace BetterBluetoothAudioConnector.ViewModels
                 nameof(updatedSnapshot));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Name)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Availability)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsConnectable)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusText)));
         }
     }

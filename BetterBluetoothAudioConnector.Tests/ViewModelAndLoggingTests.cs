@@ -23,6 +23,7 @@ namespace BetterBluetoothAudioConnector.Tests
                 service,
                 new FakeLogger(),
                 new InlineDispatcher());
+            service.SetWatcherState(DeviceWatcherState.Ready, "Ready");
             service.SetDevices(new BluetoothDeviceSnapshot(
                 "device-1",
                 Guid.NewGuid(),
@@ -56,6 +57,7 @@ namespace BetterBluetoothAudioConnector.Tests
                 service,
                 new FakeLogger(),
                 new InlineDispatcher());
+            service.SetWatcherState(DeviceWatcherState.Ready, "Ready");
 
             service.SetDevices(new BluetoothDeviceSnapshot(
                 "device-1",
@@ -93,6 +95,31 @@ namespace BetterBluetoothAudioConnector.Tests
             Assert.AreEqual(
                 "Bluetooth watcher stopped; retrying in 2 seconds",
                 viewModel.WatcherStatusText);
+        }
+
+        [TestMethod]
+        public void WatcherMustBeReadyBeforeDeviceCanConnect()
+        {
+            FakeBluetoothService service = new FakeBluetoothService();
+            using MainViewModel viewModel = new MainViewModel(
+                service,
+                new FakeLogger(),
+                new InlineDispatcher());
+            service.SetDevices(new BluetoothDeviceSnapshot(
+                "device-1",
+                Guid.NewGuid(),
+                "Test phone",
+                DeviceAvailability.Nearby,
+                false,
+                false,
+                true));
+            viewModel.SelectedDevice = viewModel.Devices[0];
+
+            service.SetWatcherState(DeviceWatcherState.Retrying, "Refreshing Bluetooth...");
+            Assert.IsFalse(viewModel.CanConnect);
+
+            service.SetWatcherState(DeviceWatcherState.Ready, "Ready");
+            Assert.IsTrue(viewModel.CanConnect);
         }
 
         [TestMethod]

@@ -9,6 +9,7 @@ using BetterBluetoothAudioConnector.Models;
 using Microsoft.Windows.System.Power;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Enumeration;
+using Windows.Devices.Radios;
 using Windows.Media.Audio;
 
 namespace BetterBluetoothAudioConnector.Services
@@ -33,17 +34,22 @@ namespace BetterBluetoothAudioConnector.Services
             new Dictionary<string, DeviceInformation>(StringComparer.Ordinal);
         private readonly Dictionary<string, DeviceInformation> aepDevices =
             new Dictionary<string, DeviceInformation>(StringComparer.Ordinal);
-        private readonly HashSet<string> playbackSeenDuringEnumeration =
+        private readonly HashSet<string> currentPlaybackGeneration =
             new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<Guid> removedPresenceContainers =
+            new HashSet<Guid>();
 
         private DeviceWatcher playbackWatcher;
         private DeviceWatcher presenceWatcher;
+        private Radio bluetoothRadio;
         private CancellationTokenSource watcherRestartCancellation;
         private CancellationTokenSource offlineConfirmationCancellation;
         private CancellationTokenSource activeSessionCancellation;
         private ActiveOperation activeOperation;
         private ConnectionHandle pendingConnection;
         private ConnectionHandle activeConnection;
+        private ConnectionHandle enabledConnection;
+        private Task transportDrain = Task.CompletedTask;
         private Guid activeSessionId;
         private string activeDeviceId;
         private string activeDeviceName;
@@ -52,6 +58,11 @@ namespace BetterBluetoothAudioConnector.Services
         private bool watching;
         private bool stoppingWatchers;
         private bool disposed;
+        private bool desiredConnection;
+        private int watcherGeneration;
+        private int automaticRecoveryCount;
+        private CancellationTokenSource automaticRecoveryCancellation;
+        private int softWatcherRefreshScheduled;
         private int watcherRestartAttempt;
         private ConnectionSnapshot currentConnection = ConnectionSnapshot.Idle;
 
@@ -122,6 +133,7 @@ namespace BetterBluetoothAudioConnector.Services
             }
 
             StartWatchers();
+            _ = InitializeRadioMonitoringAsync();
         }
 
         public async Task ConnectAsync(
@@ -138,13 +150,13 @@ namespace BetterBluetoothAudioConnector.Services
             Guid sessionId = Guid.NewGuid();
             string correlationId = logger.CreateCorrelationId();
             string anonymousDeviceId = logger.GetAnonymousDeviceId(deviceId);
-            string deviceName;
             CancellationTokenSource sessionCancellation = null;
+            ConnectionHandle connection = null;
 
             try
             {
                 BluetoothDeviceSnapshot device = GetDevice(deviceId);
-                if (device == null)
+                if (device == null || !device.IsConnectable)
                 {
                     PublishConnection(new ConnectionSnapshot(
                         AudioConnectionState.Failed,
@@ -153,36 +165,24 @@ namespace BetterBluetoothAudioConnector.Services
                         0,
                         connectionPolicy.MaximumAttempts,
                         anonymousDeviceId,
-                        "Device is no longer available",
+                        device == null
+                            ? "Device is no longer available"
+                            : "Bluetooth endpoint is not ready",
                         correlationId));
                     return;
                 }
 
-                if (device.Availability == DeviceAvailability.Offline)
-                {
-                    PublishConnection(new ConnectionSnapshot(
-                        AudioConnectionState.Failed,
-                        deviceId,
-                        "Validate",
-                        0,
-                        connectionPolicy.MaximumAttempts,
-                        anonymousDeviceId,
-                        "Device is offline",
-                        correlationId));
-                    return;
-                }
-
-                deviceName = device.Name;
                 sessionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
-
                 lock (sync)
                 {
                     ThrowIfDisposed();
+                    automaticRecoveryCancellation?.Cancel();
                     activeSessionId = sessionId;
                     activeSessionCancellation = sessionCancellation;
                     activeDeviceId = deviceId;
-                    activeDeviceName = deviceName;
+                    activeDeviceName = device.Name;
+                    desiredConnection = true;
                 }
 
                 logger.Log(
@@ -192,8 +192,28 @@ namespace BetterBluetoothAudioConnector.Services
                     {
                         ("correlation", (object)correlationId),
                         ("device", anonymousDeviceId),
-                        ("name", deviceName)
+                        ("name", device.Name)
                     });
+
+                connection = await GetOrCreateEnabledConnectionAsync(
+                    deviceId,
+                    anonymousDeviceId,
+                    correlationId,
+                    sessionId,
+                    sessionCancellation.Token);
+                if (connection == null)
+                {
+                    PublishConnection(new ConnectionSnapshot(
+                        AudioConnectionState.Failed,
+                        deviceId,
+                        "Create",
+                        0,
+                        connectionPolicy.MaximumAttempts,
+                        anonymousDeviceId,
+                        "Device does not support Bluetooth audio playback",
+                        correlationId));
+                    return;
+                }
 
                 string lastError = "Connection attempt failed";
                 bool finalFailureWasTimeout = false;
@@ -203,64 +223,41 @@ namespace BetterBluetoothAudioConnector.Services
                     sessionCancellation.Token.ThrowIfCancellationRequested();
                     EnsureSessionIsCurrent(sessionId);
 
+                    if (!await WaitForConnectionDrainAsync(
+                        connection,
+                        deviceId,
+                        anonymousDeviceId,
+                        correlationId,
+                        attempt,
+                        sessionCancellation.Token))
+                    {
+                        finalFailureWasTimeout = true;
+                        lastError = "Previous Windows Bluetooth operation is still finishing";
+                        break;
+                    }
+
                     PublishConnection(new ConnectionSnapshot(
                         AudioConnectionState.Connecting,
                         deviceId,
-                        "Create",
+                        "Open",
                         attempt,
                         connectionPolicy.MaximumAttempts,
                         anonymousDeviceId,
                         null,
                         correlationId));
 
-                    ConnectionHandle connection = null;
-
                     try
                     {
-                        IAudioConnection nativeConnection =
-                            connectionFactory.Create(deviceId);
-                        if (nativeConnection == null)
-                        {
-                            lastError = "Device does not support Bluetooth audio playback";
-                            break;
-                        }
-
-                        connection = new ConnectionHandle(
-                            nativeConnection,
-                            sessionId,
-                            deviceId,
-                            anonymousDeviceId,
-                            correlationId);
-                        nativeConnection.StateChanged += AudioConnection_StateChanged;
-
+                        Interlocked.Exchange(ref connection.NativeClosedDuringOpen, 0);
                         lock (sync)
                         {
                             EnsureSessionIsCurrentLocked(sessionId);
                             pendingConnection = connection;
                         }
 
-                        await RunActionStageAsync(
-                            nativeConnection.StartAsync(),
-                            connectionPolicy.StartTimeout,
-                            sessionId,
-                            connection,
-                            "Start",
-                            attempt,
-                            sessionCancellation.Token);
-
-                        PublishConnection(new ConnectionSnapshot(
-                            AudioConnectionState.Connecting,
-                            deviceId,
-                            "Open",
-                            attempt,
-                            connectionPolicy.MaximumAttempts,
-                            anonymousDeviceId,
-                            null,
-                            correlationId));
-
                         AudioPlaybackConnectionOpenResultStatus resultStatus =
                             await RunOperationStageAsync(
-                                nativeConnection.OpenAsync(),
+                                connection.Connection.OpenAsync(),
                                 connectionPolicy.OpenTimeout,
                                 sessionId,
                                 connection,
@@ -270,80 +267,93 @@ namespace BetterBluetoothAudioConnector.Services
 
                         EnsureSessionIsCurrent(sessionId);
 
-                        if (resultStatus != AudioPlaybackConnectionOpenResultStatus.Success)
+                        if (resultStatus == AudioPlaybackConnectionOpenResultStatus.Success)
                         {
-                            lastError = GetOpenResultErrorMessage(resultStatus);
-                            finalFailureWasTimeout =
-                                resultStatus == AudioPlaybackConnectionOpenResultStatus.RequestTimedOut;
+                            await Task.Delay(
+                                connectionPolicy.OpenStabilityDelay,
+                                sessionCancellation.Token);
+                            EnsureSessionIsCurrent(sessionId);
+                            ClearPendingConnection(connection);
 
+                            if (connection.Connection.State ==
+                                    AudioPlaybackConnectionState.Opened &&
+                                Volatile.Read(ref connection.NativeClosedDuringOpen) == 0)
+                            {
+                                lock (sync)
+                                {
+                                    EnsureSessionIsCurrentLocked(sessionId);
+                                    activeConnection = connection;
+                                    desiredConnection = true;
+                                    automaticRecoveryCount = 0;
+                                }
+
+                                PublishConnection(new ConnectionSnapshot(
+                                    AudioConnectionState.Connected,
+                                    deviceId,
+                                    "Opened",
+                                    attempt,
+                                    connectionPolicy.MaximumAttempts,
+                                    anonymousDeviceId,
+                                    null,
+                                    correlationId));
+                                PublishDevices();
+                                logger.Log(
+                                    DiagnosticLevel.Information,
+                                    "Connection.Connected",
+                                    fields: new[]
+                                    {
+                                        ("correlation", (object)correlationId),
+                                        ("device", anonymousDeviceId),
+                                        ("attempt", attempt)
+                                    });
+                                return;
+                            }
+
+                            resultStatus = AudioPlaybackConnectionOpenResultStatus.UnknownFailure;
+                            lastError = "Bluetooth audio closed while opening";
                             logger.Log(
                                 DiagnosticLevel.Warning,
-                                "Connection.OpenRejected",
+                                "Connection.OpenUnstable",
                                 lastError,
                                 fields: new[]
                                 {
                                     ("correlation", (object)correlationId),
                                     ("device", anonymousDeviceId),
                                     ("attempt", attempt),
-                                    ("status", resultStatus)
+                                    ("nativeState", connection.Connection.State)
                                 });
-
-                            SafeDisposeConnection(connection, "open rejected");
+                        }
+                        else
+                        {
                             ClearPendingConnection(connection);
-
-                            if (!IsRetryable(resultStatus) ||
-                                attempt == connectionPolicy.MaximumAttempts)
-                            {
-                                break;
-                            }
-
-                            await Task.Delay(connectionPolicy.RetryDelay, sessionCancellation.Token);
-                            continue;
+                            lastError = GetOpenResultErrorMessage(resultStatus);
                         }
 
-                        ConnectionHandle oldConnection;
-                        lock (sync)
-                        {
-                            EnsureSessionIsCurrentLocked(sessionId);
-                            oldConnection = activeConnection;
-                            activeConnection = connection;
-                            pendingConnection = null;
-                        }
-
-                        if (oldConnection != null && oldConnection != connection)
-                        {
-                            SafeDisposeConnection(oldConnection, "replaced by new connection");
-                        }
-
-                        PublishConnection(new ConnectionSnapshot(
-                            AudioConnectionState.Connected,
-                            deviceId,
-                            "Opened",
-                            attempt,
-                            connectionPolicy.MaximumAttempts,
-                            anonymousDeviceId,
-                            null,
-                            correlationId));
-                        PublishDevices();
-
+                        finalFailureWasTimeout =
+                            resultStatus == AudioPlaybackConnectionOpenResultStatus.RequestTimedOut;
                         logger.Log(
-                            DiagnosticLevel.Information,
-                            "Connection.Connected",
+                            DiagnosticLevel.Warning,
+                            "Connection.OpenRejected",
+                            lastError,
                             fields: new[]
                             {
                                 ("correlation", (object)correlationId),
                                 ("device", anonymousDeviceId),
-                                ("attempt", attempt)
+                                ("attempt", attempt),
+                                ("status", resultStatus)
                             });
-                        return;
+
+                        if (!IsRetryable(resultStatus) ||
+                            attempt == connectionPolicy.MaximumAttempts)
+                        {
+                            break;
+                        }
                     }
                     catch (ConnectionStageTimeoutException ex)
                     {
                         finalFailureWasTimeout = true;
                         lastError = ex.Stage + " timed out";
-                        SafeDisposeConnection(connection, "stage timeout");
                         ClearPendingConnection(connection);
-
                         logger.Log(
                             DiagnosticLevel.Warning,
                             "Connection.StageTimedOut",
@@ -358,12 +368,9 @@ namespace BetterBluetoothAudioConnector.Services
                         {
                             break;
                         }
-
-                        await Task.Delay(connectionPolicy.RetryDelay, sessionCancellation.Token);
                     }
                     catch (OperationCanceledException)
                     {
-                        SafeDisposeConnection(connection, "operation canceled");
                         ClearPendingConnection(connection);
                         throw;
                     }
@@ -371,9 +378,7 @@ namespace BetterBluetoothAudioConnector.Services
                     {
                         finalFailureWasTimeout = false;
                         lastError = "Connection attempt failed";
-                        SafeDisposeConnection(connection, "attempt exception");
                         ClearPendingConnection(connection);
-
                         logger.Log(
                             DiagnosticLevel.Error,
                             "Connection.AttemptFailed",
@@ -387,12 +392,28 @@ namespace BetterBluetoothAudioConnector.Services
                         {
                             break;
                         }
-
-                        await Task.Delay(connectionPolicy.RetryDelay, sessionCancellation.Token);
                     }
+
+                    PublishConnection(new ConnectionSnapshot(
+                        AudioConnectionState.Recovering,
+                        deviceId,
+                        "Backoff",
+                        attempt,
+                        connectionPolicy.MaximumAttempts,
+                        anonymousDeviceId,
+                        null,
+                        correlationId));
+                    await Task.Delay(
+                        connectionPolicy.GetRetryDelay(attempt),
+                        sessionCancellation.Token);
                 }
 
                 EnsureSessionIsCurrent(sessionId);
+                lock (sync)
+                {
+                    desiredConnection = false;
+                    activeConnection = null;
+                }
                 PublishConnection(new ConnectionSnapshot(
                     finalFailureWasTimeout
                         ? AudioConnectionState.TimedOut
@@ -404,9 +425,30 @@ namespace BetterBluetoothAudioConnector.Services
                     anonymousDeviceId,
                     lastError,
                     correlationId));
+                ScheduleSoftWatcherRefresh();
+            }
+            catch (ConnectionStageTimeoutException ex)
+            {
+                lock (sync)
+                {
+                    desiredConnection = false;
+                }
+                PublishConnection(new ConnectionSnapshot(
+                    AudioConnectionState.TimedOut,
+                    deviceId,
+                    ex.Stage,
+                    0,
+                    connectionPolicy.MaximumAttempts,
+                    anonymousDeviceId,
+                    ex.Stage + " timed out",
+                    correlationId));
             }
             catch (OperationCanceledException)
             {
+                lock (sync)
+                {
+                    desiredConnection = false;
+                }
                 if (IsSessionCurrent(sessionId))
                 {
                     PublishConnection(new ConnectionSnapshot(
@@ -429,6 +471,30 @@ namespace BetterBluetoothAudioConnector.Services
                         ("device", anonymousDeviceId)
                     });
             }
+            catch (Exception ex)
+            {
+                lock (sync)
+                {
+                    desiredConnection = false;
+                    activeConnection = null;
+                }
+                logger.Log(
+                    DiagnosticLevel.Error,
+                    "Connection.SessionFailed",
+                    "Connection session failed",
+                    ex,
+                    ("correlation", correlationId),
+                    ("device", anonymousDeviceId));
+                PublishConnection(new ConnectionSnapshot(
+                    AudioConnectionState.Failed,
+                    deviceId,
+                    "Complete",
+                    0,
+                    connectionPolicy.MaximumAttempts,
+                    anonymousDeviceId,
+                    "Connection attempt failed",
+                    correlationId));
+            }
             finally
             {
                 lock (sync)
@@ -440,7 +506,7 @@ namespace BetterBluetoothAudioConnector.Services
                         activeSessionCancellation = null;
                         activeSessionId = Guid.Empty;
 
-                        if (activeConnection == null)
+                        if (activeConnection == null && !desiredConnection)
                         {
                             activeDeviceId = null;
                             activeDeviceName = null;
@@ -457,7 +523,6 @@ namespace BetterBluetoothAudioConnector.Services
         {
             CancellationTokenSource cancellation;
             ActiveOperation operation;
-            ConnectionHandle connection;
             ConnectionSnapshot snapshot;
 
             lock (sync)
@@ -469,9 +534,10 @@ namespace BetterBluetoothAudioConnector.Services
 
                 cancellation = activeSessionCancellation;
                 operation = activeOperation;
-                connection = pendingConnection;
                 pendingConnection = null;
                 snapshot = currentConnection;
+                desiredConnection = false;
+                automaticRecoveryCancellation?.Cancel();
             }
 
             PublishConnection(new ConnectionSnapshot(
@@ -503,7 +569,9 @@ namespace BetterBluetoothAudioConnector.Services
             {
             }
 
-            SafeDisposeConnection(connection, "connection canceled");
+            // Cancel is cooperative. Keep the enabled connection alive and quarantine
+            // it until the WinRT operation reaches a terminal state; disposing here is
+            // what previously allowed a new Open to overlap the old one in Windows.
         }
 
         public async Task DisconnectAsync(CancellationToken cancellationToken = default)
@@ -518,7 +586,10 @@ namespace BetterBluetoothAudioConnector.Services
 
                 lock (sync)
                 {
-                    connection = activeConnection;
+                    desiredConnection = false;
+                    automaticRecoveryCancellation?.Cancel();
+                    connection = enabledConnection;
+                    enabledConnection = null;
                     activeConnection = null;
                     snapshot = currentConnection;
                 }
@@ -538,7 +609,37 @@ namespace BetterBluetoothAudioConnector.Services
                     null,
                     connection.CorrelationId));
 
-                SafeDisposeConnection(connection, "disconnect requested");
+                Task drain = GetConnectionDrainTask(connection);
+                bool drained = true;
+                if (!drain.IsCompleted)
+                {
+                    PublishConnection(new ConnectionSnapshot(
+                        AudioConnectionState.Recovering,
+                        connection.DeviceId,
+                        "Drain",
+                        snapshot.Attempt,
+                        snapshot.MaximumAttempts,
+                        connection.AnonymousDeviceId,
+                        null,
+                        connection.CorrelationId));
+                    drained = await WaitForTaskOrTimeoutAsync(
+                        drain,
+                        connectionPolicy.OperationDrainTimeout,
+                        cancellationToken);
+                }
+
+                if (drained)
+                {
+                    await Task.Run(
+                        () => SafeDisposeConnection(connection, "disconnect requested"),
+                        CancellationToken.None);
+                }
+                else
+                {
+                    _ = DisposeAfterDrainAsync(
+                        connection,
+                        "disconnect completed after operation drain");
+                }
 
                 lock (sync)
                 {
@@ -575,9 +676,11 @@ namespace BetterBluetoothAudioConnector.Services
         public void Dispose()
         {
             CancellationTokenSource sessionCancellation;
+            CancellationTokenSource recoveryCancellation;
             ActiveOperation operation;
             ConnectionHandle pending;
             ConnectionHandle active;
+            ConnectionHandle enabled;
 
             lock (sync)
             {
@@ -592,15 +695,25 @@ namespace BetterBluetoothAudioConnector.Services
                 operation = activeOperation;
                 pending = pendingConnection;
                 active = activeConnection;
+                enabled = enabledConnection;
+                recoveryCancellation = automaticRecoveryCancellation;
                 activeSessionCancellation = null;
                 activeOperation = null;
                 pendingConnection = null;
                 activeConnection = null;
+                enabledConnection = null;
+                automaticRecoveryCancellation = null;
             }
 
             PowerManager.SystemSuspendStatusChanged -= PowerManager_SystemSuspendStatusChanged;
+            if (bluetoothRadio != null)
+            {
+                bluetoothRadio.StateChanged -= BluetoothRadio_StateChanged;
+                bluetoothRadio = null;
+            }
             watcherRestartCancellation?.Cancel();
             offlineConfirmationCancellation?.Cancel();
+            recoveryCancellation?.Cancel();
             StopAndReleaseWatchers();
 
             TryCancelOperation(operation, "service disposed");
@@ -614,6 +727,10 @@ namespace BetterBluetoothAudioConnector.Services
 
             SafeDisposeConnection(pending, "service disposed");
             SafeDisposeConnection(active, "service disposed");
+            if (enabled != pending && enabled != active)
+            {
+                SafeDisposeConnection(enabled, "service disposed");
+            }
 
             PublishWatcherState(DeviceWatcherState.Stopped, "Device monitoring stopped");
             logger.Log(DiagnosticLevel.Information, "BluetoothService.Disposed");
@@ -660,14 +777,19 @@ namespace BetterBluetoothAudioConnector.Services
                     presenceWatcher = newPresenceWatcher;
                     playbackEnumerationCompleted = false;
                     presenceEnumerationCompleted = false;
-                    playbackSeenDuringEnumeration.Clear();
+                    watcherGeneration++;
+                    currentPlaybackGeneration.Clear();
+                    removedPresenceContainers.Clear();
                     aepDevices.Clear();
                 }
 
                 newPlaybackWatcher.Start();
                 newPresenceWatcher.Start();
 
-                logger.Log(DiagnosticLevel.Information, "DeviceWatchers.Started");
+                logger.Log(
+                    DiagnosticLevel.Information,
+                    "DeviceWatchers.Started",
+                    fields: new[] { ("generation", (object)watcherGeneration) });
                 PublishDevices();
             }
             catch (Exception ex)
@@ -679,6 +801,90 @@ namespace BetterBluetoothAudioConnector.Services
                     ex);
                 ScheduleWatcherRestart();
             }
+        }
+
+        private async Task InitializeRadioMonitoringAsync()
+        {
+            try
+            {
+                IReadOnlyList<Radio> radios = await Radio.GetRadiosAsync();
+                Radio radio = radios.FirstOrDefault(item => item.Kind == RadioKind.Bluetooth);
+                lock (sync)
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    if (bluetoothRadio != null)
+                    {
+                        bluetoothRadio.StateChanged -= BluetoothRadio_StateChanged;
+                    }
+                    bluetoothRadio = radio;
+                    if (bluetoothRadio != null)
+                    {
+                        bluetoothRadio.StateChanged += BluetoothRadio_StateChanged;
+                    }
+                }
+
+                if (radio != null && radio.State != RadioState.On)
+                {
+                    HandleBluetoothRadioState(radio.State);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.Log(
+                    DiagnosticLevel.Warning,
+                    "BluetoothRadio.MonitoringUnavailable",
+                    exception: ex);
+            }
+        }
+
+        private void BluetoothRadio_StateChanged(Radio sender, object args)
+        {
+            HandleBluetoothRadioState(sender.State);
+        }
+
+        private void HandleBluetoothRadioState(RadioState state)
+        {
+            logger.Log(
+                DiagnosticLevel.Information,
+                "BluetoothRadio.StateChanged",
+                fields: new[] { ("state", (object)state) });
+
+            if (state != RadioState.On)
+            {
+                bool hasEnabledConnection;
+                lock (sync)
+                {
+                    playbackEnumerationCompleted = false;
+                    presenceEnumerationCompleted = false;
+                    currentPlaybackGeneration.Clear();
+                    desiredConnection = false;
+                    hasEnabledConnection = enabledConnection != null;
+                }
+                PublishWatcherState(
+                    DeviceWatcherState.Unavailable,
+                    "Bluetooth is turned off");
+                PublishDevices();
+                CancelCurrentOperation();
+                if (hasEnabledConnection)
+                {
+                    _ = DisconnectAsync();
+                }
+                return;
+            }
+
+            lock (sync)
+            {
+                if (disposed || !watching)
+                {
+                    return;
+                }
+            }
+
+            ScheduleSoftWatcherRefresh();
         }
 
         private void AttachPlaybackWatcher(DeviceWatcher watcher)
@@ -709,7 +915,7 @@ namespace BetterBluetoothAudioConnector.Services
                 }
 
                 playbackDevices[device.Id] = device;
-                playbackSeenDuringEnumeration.Add(device.Id);
+                currentPlaybackGeneration.Add(device.Id);
             }
 
             LogDeviceEvent("PlaybackDevice.Added", device);
@@ -748,7 +954,7 @@ namespace BetterBluetoothAudioConnector.Services
                     return;
                 }
 
-                playbackDevices.Remove(update.Id);
+                currentPlaybackGeneration.Remove(update.Id);
                 affectsActiveDevice = activeDeviceId == update.Id;
             }
 
@@ -777,15 +983,7 @@ namespace BetterBluetoothAudioConnector.Services
                     return;
                 }
 
-                foreach (string id in playbackDevices.Keys
-                    .Where(id => !playbackSeenDuringEnumeration.Contains(id))
-                    .ToList())
-                {
-                    playbackDevices.Remove(id);
-                }
-
                 playbackEnumerationCompleted = true;
-                watcherRestartAttempt = 0;
             }
 
             logger.Log(DiagnosticLevel.Information, "PlaybackWatcher.EnumerationCompleted");
@@ -803,6 +1001,11 @@ namespace BetterBluetoothAudioConnector.Services
                 }
 
                 aepDevices[device.Id] = device;
+                Guid? containerId = GetGuidProperty(device, AepContainerIdProperty);
+                if (containerId.HasValue)
+                {
+                    removedPresenceContainers.Remove(containerId.Value);
+                }
             }
 
             LogDeviceEvent("PresenceDevice.Added", device);
@@ -833,6 +1036,7 @@ namespace BetterBluetoothAudioConnector.Services
             DeviceWatcher sender,
             DeviceInformationUpdate update)
         {
+            Guid? removedContainer = null;
             lock (sync)
             {
                 if (sender != presenceWatcher)
@@ -840,7 +1044,15 @@ namespace BetterBluetoothAudioConnector.Services
                     return;
                 }
 
+                if (aepDevices.TryGetValue(update.Id, out DeviceInformation removed))
+                {
+                    removedContainer = GetGuidProperty(removed, AepContainerIdProperty);
+                }
                 aepDevices.Remove(update.Id);
+                if (removedContainer.HasValue)
+                {
+                    removedPresenceContainers.Add(removedContainer.Value);
+                }
             }
 
             logger.Log(
@@ -863,7 +1075,6 @@ namespace BetterBluetoothAudioConnector.Services
                 }
 
                 presenceEnumerationCompleted = true;
-                watcherRestartAttempt = 0;
             }
 
             logger.Log(DiagnosticLevel.Information, "PresenceWatcher.EnumerationCompleted");
@@ -1013,6 +1224,261 @@ namespace BetterBluetoothAudioConnector.Services
             }
         }
 
+        private async Task<ConnectionHandle> GetOrCreateEnabledConnectionAsync(
+            string deviceId,
+            string anonymousDeviceId,
+            string correlationId,
+            Guid sessionId,
+            CancellationToken cancellationToken)
+        {
+            Task previousTransportDrain;
+            lock (sync)
+            {
+                previousTransportDrain = transportDrain;
+            }
+
+            if (!await WaitForTaskOrTimeoutAsync(
+                previousTransportDrain,
+                connectionPolicy.OperationDrainTimeout,
+                cancellationToken))
+            {
+                throw new ConnectionStageTimeoutException(
+                    "Recovery",
+                    connectionPolicy.OperationDrainTimeout);
+            }
+
+            ConnectionHandle existing;
+            lock (sync)
+            {
+                existing = enabledConnection;
+                if (existing != null &&
+                    existing.DeviceId == deviceId &&
+                    Volatile.Read(ref existing.Disposed) == 0)
+                {
+                    existing.BeginSession(sessionId, correlationId);
+                    return existing;
+                }
+
+                enabledConnection = null;
+                activeConnection = null;
+            }
+
+            if (existing != null)
+            {
+                await WaitForTaskOrTimeoutAsync(
+                    GetConnectionDrainTask(existing),
+                    connectionPolicy.OperationDrainTimeout,
+                    cancellationToken);
+                await Task.Run(
+                    () => SafeDisposeConnection(existing, "switching device"),
+                    CancellationToken.None);
+            }
+
+            IAudioConnection nativeConnection = connectionFactory.Create(deviceId);
+            if (nativeConnection == null)
+            {
+                return null;
+            }
+
+            ConnectionHandle connection = new ConnectionHandle(
+                nativeConnection,
+                sessionId,
+                deviceId,
+                anonymousDeviceId,
+                correlationId);
+            nativeConnection.StateChanged += AudioConnection_StateChanged;
+
+            lock (sync)
+            {
+                EnsureSessionIsCurrentLocked(sessionId);
+                enabledConnection = connection;
+                pendingConnection = connection;
+            }
+
+            PublishConnection(new ConnectionSnapshot(
+                AudioConnectionState.Connecting,
+                deviceId,
+                "Start",
+                0,
+                connectionPolicy.MaximumAttempts,
+                anonymousDeviceId,
+                null,
+                correlationId));
+
+            try
+            {
+                await RunActionStageAsync(
+                    nativeConnection.StartAsync(),
+                    connectionPolicy.StartTimeout,
+                    sessionId,
+                    connection,
+                    "Start",
+                    0,
+                    cancellationToken);
+                connection.Started = true;
+                ClearPendingConnection(connection);
+                logger.Log(
+                    DiagnosticLevel.Information,
+                    "Connection.Enabled",
+                    fields: new[]
+                    {
+                        ("correlation", (object)correlationId),
+                        ("device", anonymousDeviceId)
+                    });
+                return connection;
+            }
+            catch
+            {
+                ClearPendingConnection(connection);
+                lock (sync)
+                {
+                    if (enabledConnection == connection)
+                    {
+                        enabledConnection = null;
+                    }
+                }
+
+                _ = DisposeAfterDrainAsync(connection, "enable failed");
+                throw;
+            }
+        }
+
+        private async Task<bool> WaitForConnectionDrainAsync(
+            ConnectionHandle connection,
+            string deviceId,
+            string anonymousDeviceId,
+            string correlationId,
+            int attempt,
+            CancellationToken cancellationToken)
+        {
+            Task drain = GetConnectionDrainTask(connection);
+            if (drain.IsCompleted)
+            {
+                await drain;
+                return true;
+            }
+
+            PublishConnection(new ConnectionSnapshot(
+                AudioConnectionState.Recovering,
+                deviceId,
+                "Drain",
+                attempt,
+                connectionPolicy.MaximumAttempts,
+                anonymousDeviceId,
+                null,
+                correlationId));
+            logger.Log(
+                DiagnosticLevel.Information,
+                "Connection.WaitingForPreviousOperation",
+                fields: new[]
+                {
+                    ("correlation", (object)correlationId),
+                    ("device", anonymousDeviceId),
+                    ("attempt", attempt)
+                });
+
+            return await WaitForTaskOrTimeoutAsync(
+                drain,
+                connectionPolicy.OperationDrainTimeout,
+                cancellationToken);
+        }
+
+        private static Task GetConnectionDrainTask(ConnectionHandle connection)
+        {
+            lock (connection.LifecycleSync)
+            {
+                return connection.DrainTask ?? Task.CompletedTask;
+            }
+        }
+
+        private static async Task<bool> WaitForTaskOrTimeoutAsync(
+            Task task,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            if (task.IsCompleted)
+            {
+                await task;
+                return true;
+            }
+
+            Task timeoutTask = Task.Delay(timeout, cancellationToken);
+            Task completed = await Task.WhenAny(task, timeoutTask);
+            if (completed == task)
+            {
+                await task;
+                return true;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return false;
+        }
+
+        private async Task DisposeAfterDrainAsync(
+            ConnectionHandle connection,
+            string reason)
+        {
+            try
+            {
+                await GetConnectionDrainTask(connection);
+            }
+            catch
+            {
+            }
+
+            await Task.Run(
+                () => SafeDisposeConnection(connection, reason),
+                CancellationToken.None);
+        }
+
+        private void ScheduleSoftWatcherRefresh()
+        {
+            if (Interlocked.Exchange(ref softWatcherRefreshScheduled, 1) != 0)
+            {
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2));
+                    lock (sync)
+                    {
+                        if (disposed || !watching || activeConnection != null)
+                        {
+                            return;
+                        }
+                    }
+
+                    CancellationTokenSource scheduledRestart;
+                    lock (sync)
+                    {
+                        scheduledRestart = watcherRestartCancellation;
+                        watcherRestartCancellation = null;
+                    }
+                    scheduledRestart?.Cancel();
+
+                    logger.Log(
+                        DiagnosticLevel.Information,
+                        "DeviceWatchers.SoftRefreshStarted");
+                    StopAndReleaseWatchers();
+                    StartWatchers();
+                }
+                catch (Exception ex)
+                {
+                    logger.Log(
+                        DiagnosticLevel.Warning,
+                        "DeviceWatchers.SoftRefreshFailed",
+                        exception: ex);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref softWatcherRefreshScheduled, 0);
+                }
+            });
+        }
+
         private async Task RunActionStageAsync(
             ICancelableOperation operation,
             TimeSpan timeout,
@@ -1107,11 +1573,19 @@ namespace BetterBluetoothAudioConnector.Services
                 TryCancelOperation(
                     operationContext,
                     cancellationToken.IsCancellationRequested ? "canceled" : "timed out");
-                ObserveLateOperation(
+                Task drain = ObserveLateOperationAsync(
                     operationTask,
                     operationContext,
                     connection.CorrelationId,
                     connection.AnonymousDeviceId);
+                lock (connection.LifecycleSync)
+                {
+                    connection.DrainTask = drain;
+                }
+                lock (sync)
+                {
+                    transportDrain = drain;
+                }
 
                 if (cancellationToken.IsCancellationRequested)
                 {
@@ -1143,36 +1617,71 @@ namespace BetterBluetoothAudioConnector.Services
             }
         }
 
-        private void ObserveLateOperation(
+        private async Task ObserveLateOperationAsync(
             Task operationTask,
             ActiveOperation operation,
             string correlationId,
             string anonymousDeviceId)
         {
             ClearActiveOperation(operation);
-
-            _ = operationTask.ContinueWith(
-                completed =>
+            Exception exception = null;
+            object lateResult = null;
+            try
+            {
+                await operationTask;
+                if (operationTask is
+                    Task<AudioPlaybackConnectionOpenResultStatus> openTask)
                 {
-                    Exception exception = completed.Exception?.GetBaseException();
-                    logger.Log(
-                        exception == null
-                            ? DiagnosticLevel.Information
-                            : DiagnosticLevel.Warning,
-                        "Connection.LateOperationCompleted",
-                        fields: new[]
-                        {
-                            ("correlation", (object)correlationId),
-                            ("device", anonymousDeviceId),
-                            ("stage", operation.Stage),
-                            ("taskStatus", completed.Status),
-                            ("error", exception?.Message)
-                        });
-                    TryCloseOperation(operation);
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+                    lateResult = openTask.Result;
+                }
+            }
+            catch (Exception ex)
+            {
+                exception = ex.GetBaseException();
+            }
+            finally
+            {
+                logger.Log(
+                    exception == null
+                        ? DiagnosticLevel.Information
+                        : DiagnosticLevel.Warning,
+                    "Connection.LateOperationCompleted",
+                    fields: new[]
+                    {
+                        ("correlation", (object)correlationId),
+                        ("device", anonymousDeviceId),
+                        ("stage", operation.Stage),
+                        ("taskStatus", operationTask.Status),
+                        ("result", lateResult),
+                        ("error", exception?.Message)
+                    });
+                TryCloseOperation(operation);
+
+                bool releaseLateOpenedConnection;
+                lock (sync)
+                {
+                    releaseLateOpenedConnection =
+                        !desiredConnection &&
+                        enabledConnection == operation.Connection &&
+                        operation.Connection.Connection.State ==
+                            AudioPlaybackConnectionState.Opened;
+                    if (releaseLateOpenedConnection)
+                    {
+                        enabledConnection = null;
+                        activeConnection = null;
+                    }
+                }
+
+                if (releaseLateOpenedConnection)
+                {
+                    await Task.Run(
+                        () => SafeDisposeConnection(
+                            operation.Connection,
+                            "late open completed after cancellation"),
+                        CancellationToken.None);
+                    PublishDevices();
+                }
+            }
         }
 
         private void AudioConnection_StateChanged(object sender, EventArgs args)
@@ -1185,6 +1694,7 @@ namespace BetterBluetoothAudioConnector.Services
 
             ConnectionHandle connection;
             bool isActive;
+            bool isPending;
 
             lock (sync)
             {
@@ -1192,11 +1702,19 @@ namespace BetterBluetoothAudioConnector.Services
                 {
                     connection = activeConnection;
                     isActive = true;
+                    isPending = false;
                 }
                 else if (pendingConnection?.Connection == changedConnection)
                 {
                     connection = pendingConnection;
                     isActive = false;
+                    isPending = true;
+                }
+                else if (enabledConnection?.Connection == changedConnection)
+                {
+                    connection = enabledConnection;
+                    isActive = false;
+                    isPending = false;
                 }
                 else
                 {
@@ -1212,10 +1730,22 @@ namespace BetterBluetoothAudioConnector.Services
                     ("correlation", (object)connection.CorrelationId),
                     ("device", connection.AnonymousDeviceId),
                     ("state", changedConnection.State),
-                    ("active", isActive)
+                    ("active", isActive),
+                    ("pending", isPending)
                 });
 
-            if (!isActive || changedConnection.State == AudioPlaybackConnectionState.Opened)
+            if (changedConnection.State == AudioPlaybackConnectionState.Opened)
+            {
+                return;
+            }
+
+            if (isPending)
+            {
+                Interlocked.Exchange(ref connection.NativeClosedDuringOpen, 1);
+                return;
+            }
+
+            if (!isActive)
             {
                 return;
             }
@@ -1228,11 +1758,8 @@ namespace BetterBluetoothAudioConnector.Services
                 }
 
                 activeConnection = null;
-                activeDeviceId = null;
-                activeDeviceName = null;
             }
 
-            SafeDisposeConnection(connection, "native state closed");
             PublishConnection(new ConnectionSnapshot(
                 AudioConnectionState.Disconnected,
                 connection.DeviceId,
@@ -1243,6 +1770,78 @@ namespace BetterBluetoothAudioConnector.Services
                 null,
                 connection.CorrelationId));
             PublishDevices();
+            ScheduleAutomaticRecovery(connection.DeviceId);
+        }
+
+        private void ScheduleAutomaticRecovery(string deviceId)
+        {
+            CancellationTokenSource cancellation;
+            int attempt;
+            lock (sync)
+            {
+                if (disposed || !desiredConnection || automaticRecoveryCount >= 2)
+                {
+                    return;
+                }
+
+                automaticRecoveryCount++;
+                attempt = automaticRecoveryCount;
+                automaticRecoveryCancellation?.Cancel();
+                cancellation = new CancellationTokenSource();
+                automaticRecoveryCancellation = cancellation;
+            }
+
+            logger.Log(
+                DiagnosticLevel.Information,
+                "Connection.AutomaticRecoveryScheduled",
+                fields: new[]
+                {
+                    ("device", (object)logger.GetAnonymousDeviceId(deviceId)),
+                    ("attempt", attempt)
+                });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(
+                        TimeSpan.FromSeconds(attempt == 1 ? 1 : 3),
+                        cancellation.Token);
+                    BluetoothDeviceSnapshot device = GetDevice(deviceId);
+                    lock (sync)
+                    {
+                        if (disposed || !desiredConnection ||
+                            activeConnection != null || device?.IsConnectable != true)
+                        {
+                            return;
+                        }
+                    }
+
+                    await ConnectAsync(deviceId);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    logger.Log(
+                        DiagnosticLevel.Warning,
+                        "Connection.AutomaticRecoveryFailed",
+                        exception: ex,
+                        fields: new[] { ("attempt", (object)attempt) });
+                }
+                finally
+                {
+                    lock (sync)
+                    {
+                        if (automaticRecoveryCancellation == cancellation)
+                        {
+                            automaticRecoveryCancellation = null;
+                        }
+                    }
+                    cancellation.Dispose();
+                }
+            });
         }
 
         private void PowerManager_SystemSuspendStatusChanged(object sender, object args)
@@ -1258,6 +1857,10 @@ namespace BetterBluetoothAudioConnector.Services
             lock (sync)
             {
                 deviceId = activeConnection?.DeviceId;
+                if (deviceId != null)
+                {
+                    activeConnection = null;
+                }
             }
 
             if (deviceId == null)
@@ -1272,16 +1875,51 @@ namespace BetterBluetoothAudioConnector.Services
                 {
                     ("device", (object)logger.GetAnonymousDeviceId(deviceId))
                 });
+            PublishConnection(new ConnectionSnapshot(
+                AudioConnectionState.Recovering,
+                deviceId,
+                "Resume",
+                0,
+                connectionPolicy.MaximumAttempts,
+                logger.GetAnonymousDeviceId(deviceId),
+                null,
+                logger.CreateCorrelationId()));
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1));
-                    BluetoothDeviceSnapshot device = GetDevice(deviceId);
-                    if (!disposed && device?.Availability != DeviceAvailability.Offline)
+                    ScheduleSoftWatcherRefresh();
+                    BluetoothDeviceSnapshot device = null;
+                    for (int check = 0; check < 40 && !disposed; check++)
                     {
-                        await ReconnectAsync(deviceId);
+                        await Task.Delay(TimeSpan.FromMilliseconds(250));
+                        device = GetDevice(deviceId);
+                        if (device?.IsConnectable == true)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (!disposed && device?.IsConnectable == true)
+                    {
+                        await ConnectAsync(deviceId);
+                    }
+                    else if (!disposed)
+                    {
+                        lock (sync)
+                        {
+                            desiredConnection = false;
+                        }
+                        PublishConnection(new ConnectionSnapshot(
+                            AudioConnectionState.Disconnected,
+                            deviceId,
+                            "Resume",
+                            0,
+                            connectionPolicy.MaximumAttempts,
+                            logger.GetAnonymousDeviceId(deviceId),
+                            "Bluetooth endpoint did not return after resume",
+                            logger.CreateCorrelationId()));
                     }
                 }
                 catch (Exception ex)
@@ -1307,10 +1945,16 @@ namespace BetterBluetoothAudioConnector.Services
             Guid? containerId = GetGuidProperty(device, ContainerIdProperty);
             DeviceAvailability availability;
             bool isSystemConnected = false;
+            bool isPaired = true;
+            bool endpointIsCurrent = currentPlaybackGeneration.Contains(device.Id);
 
-            if (!presenceEnumerationCompleted)
+            if (!playbackEnumerationCompleted || !presenceEnumerationCompleted)
             {
                 availability = DeviceAvailability.Checking;
+            }
+            else if (!endpointIsCurrent)
+            {
+                availability = DeviceAvailability.Offline;
             }
             else if (!containerId.HasValue)
             {
@@ -1329,9 +1973,17 @@ namespace BetterBluetoothAudioConnector.Services
                 bool? connected = AggregateBooleanProperty(
                     matchingEndpoints,
                     AepIsConnectedProperty);
+                bool? paired = AggregateBooleanProperty(
+                    matchingEndpoints,
+                    AepIsPairedProperty);
                 isSystemConnected = connected == true;
+                isPaired = paired != false;
 
-                if (isPresent == true)
+                if (removedPresenceContainers.Contains(containerId.Value))
+                {
+                    availability = DeviceAvailability.Offline;
+                }
+                else if (isPresent == true)
                 {
                     availability = DeviceAvailability.Nearby;
                 }
@@ -1354,7 +2006,12 @@ namespace BetterBluetoothAudioConnector.Services
                 string.IsNullOrWhiteSpace(device.Name) ? "Unknown device" : device.Name,
                 availability,
                 isSystemConnected,
-                isAudioConnected);
+                isAudioConnected,
+                endpointIsCurrent &&
+                    playbackEnumerationCompleted &&
+                    presenceEnumerationCompleted &&
+                    availability != DeviceAvailability.Offline &&
+                    isPaired);
         }
 
         private static bool? AggregateBooleanProperty(
@@ -1460,6 +2117,10 @@ namespace BetterBluetoothAudioConnector.Services
 
             if (ready)
             {
+                lock (sync)
+                {
+                    watcherRestartAttempt = 0;
+                }
                 PublishWatcherState(DeviceWatcherState.Ready, "Device monitoring active");
             }
         }
@@ -1514,6 +2175,13 @@ namespace BetterBluetoothAudioConnector.Services
                 }
                 finally
                 {
+                    lock (sync)
+                    {
+                        if (offlineConfirmationCancellation == cancellation)
+                        {
+                            offlineConfirmationCancellation = null;
+                        }
+                    }
                     cancellation.Dispose();
                 }
             });
@@ -1535,6 +2203,7 @@ namespace BetterBluetoothAudioConnector.Services
         {
             bool connecting;
             bool connected;
+            ConnectionHandle idleEnabled;
             lock (sync)
             {
                 if (activeDeviceId != deviceId)
@@ -1542,8 +2211,18 @@ namespace BetterBluetoothAudioConnector.Services
                     return;
                 }
 
+                desiredConnection = false;
+                automaticRecoveryCancellation?.Cancel();
                 connecting = activeSessionCancellation != null;
                 connected = activeConnection != null;
+                idleEnabled = !connecting && !connected &&
+                    enabledConnection?.DeviceId == deviceId
+                        ? enabledConnection
+                        : null;
+                if (idleEnabled != null)
+                {
+                    enabledConnection = null;
+                }
             }
 
             if (connecting)
@@ -1553,6 +2232,10 @@ namespace BetterBluetoothAudioConnector.Services
             else if (connected)
             {
                 _ = DisconnectAsync();
+            }
+            else if (idleEnabled != null)
+            {
+                _ = DisposeAfterDrainAsync(idleEnabled, "device unavailable");
             }
         }
 
@@ -1763,15 +2446,29 @@ namespace BetterBluetoothAudioConnector.Services
                 CorrelationId = correlationId;
             }
 
+            public object LifecycleSync { get; } = new object();
+
             public IAudioConnection Connection { get; }
 
-            public Guid SessionId { get; }
+            public Guid SessionId { get; private set; }
 
             public string DeviceId { get; }
 
             public string AnonymousDeviceId { get; }
 
-            public string CorrelationId { get; }
+            public string CorrelationId { get; private set; }
+
+            public Task DrainTask { get; set; } = Task.CompletedTask;
+
+            public bool Started { get; set; }
+
+            public int NativeClosedDuringOpen;
+
+            public void BeginSession(Guid sessionId, string correlationId)
+            {
+                SessionId = sessionId;
+                CorrelationId = correlationId;
+            }
 
             public int Disposed;
         }

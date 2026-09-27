@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?$')]
-    [string]$Version = '1.0.1',
+    [string]$Version = '1.0.2',
 
     [switch]$SkipPublish
 )
@@ -16,6 +16,7 @@ $applicationPath = Join-Path $publishDirectory 'Better Bluetooth Audio Connector
 $resourceIndexPath = Join-Path $publishDirectory 'resources.pri'
 $installerDirectory = Join-Path $repositoryRoot 'artifacts\installer'
 $installerPath = Join-Path $installerDirectory "BetterBluetoothAudioConnector-Setup-$Version-x64.exe"
+$checksumPath = Join-Path $installerDirectory "BetterBluetoothAudioConnector-Setup-$Version-x64.sha256.txt"
 
 if (-not $SkipPublish) {
     & dotnet publish $projectPath --configuration Release --no-restore -p:Platform=x64
@@ -55,9 +56,12 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
 
 $installer = Get-Item -LiteralPath $installerPath
 $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA256
+$checksumLine = "$($hash.Hash) *$($installer.Name)$([Environment]::NewLine)"
+[System.IO.File]::WriteAllText($checksumPath, $checksumLine, [System.Text.UTF8Encoding]::new($false))
 
 [pscustomobject]@{
     Installer = $installer.FullName
+    ChecksumFile = $checksumPath
     SizeMiB = [math]::Round($installer.Length / 1MB, 2)
     SHA256 = $hash.Hash
 }

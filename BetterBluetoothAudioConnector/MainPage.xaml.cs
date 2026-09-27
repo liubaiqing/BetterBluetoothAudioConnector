@@ -154,8 +154,9 @@ namespace BetterBluetoothAudioConnector
             systemMediaTransportControls.PlaybackStatus = ViewModel.ConnectionState switch
             {
                 AudioConnectionState.Connected => MediaPlaybackStatus.Playing,
-                AudioConnectionState.Connecting or
-                AudioConnectionState.Canceling or
+                 AudioConnectionState.Connecting or
+                 AudioConnectionState.Recovering or
+                 AudioConnectionState.Canceling or
                 AudioConnectionState.Disconnecting => MediaPlaybackStatus.Changing,
                 _ => MediaPlaybackStatus.Stopped
             };

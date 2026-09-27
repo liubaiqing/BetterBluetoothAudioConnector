@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.0.1"
+  #define AppVersion "1.0.2"
 #endif
 
 #define AppName "Better Bluetooth Audio Connector"
@@ -33,6 +33,7 @@ MinVersion=10.0.19041
 OutputDir=..\artifacts\installer
 OutputBaseFilename=BetterBluetoothAudioConnector-Setup-{#AppVersion}-x64
 SetupIconFile=..\BetterBluetoothAudioConnector\Assets\BetterBluetoothAudioConnector.ico
+LicenseFile=..\LICENSE
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes
