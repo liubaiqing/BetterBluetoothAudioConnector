@@ -136,9 +136,17 @@ namespace BetterBluetoothAudioConnector.Services
             _ = InitializeRadioMonitoringAsync();
         }
 
-        public async Task ConnectAsync(
+        public Task ConnectAsync(
             string deviceId,
             CancellationToken cancellationToken = default)
+        {
+            return ConnectCoreAsync(deviceId, true, cancellationToken);
+        }
+
+        private async Task ConnectCoreAsync(
+            string deviceId,
+            bool allowInitialStabilization,
+            CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(deviceId))
             {
@@ -279,6 +287,61 @@ namespace BetterBluetoothAudioConnector.Services
                                     AudioPlaybackConnectionState.Opened &&
                                 Volatile.Read(ref connection.NativeClosedDuringOpen) == 0)
                             {
+                                if (allowInitialStabilization &&
+                                    connectionPolicy.StabilizeInitialConnection &&
+                                    attempt == 1)
+                                {
+                                    logger.Log(
+                                        DiagnosticLevel.Information,
+                                        "Connection.InitialStabilizationStarted",
+                                        fields: new[]
+                                        {
+                                            ("correlation", (object)correlationId),
+                                            ("device", anonymousDeviceId)
+                                        });
+                                    PublishConnection(new ConnectionSnapshot(
+                                        AudioConnectionState.Recovering,
+                                        deviceId,
+                                        "Stabilize",
+                                        attempt,
+                                        connectionPolicy.MaximumAttempts,
+                                        anonymousDeviceId,
+                                        null,
+                                        correlationId));
+
+                                    bool stabilizationReleased =
+                                        await ReleaseAttemptConnectionAsync(
+                                        connection,
+                                        "initial connection stabilization",
+                                        sessionCancellation.Token);
+                                    connection = null;
+                                    if (!stabilizationReleased)
+                                    {
+                                        finalFailureWasTimeout = true;
+                                        lastError =
+                                            "Initial Windows Bluetooth operation is still finishing";
+                                        break;
+                                    }
+
+                                    await WaitForReconnectCooldownAsync(
+                                        deviceId,
+                                        sessionCancellation.Token);
+                                    connection = await GetOrCreateEnabledConnectionAsync(
+                                        deviceId,
+                                        anonymousDeviceId,
+                                        correlationId,
+                                        sessionId,
+                                        sessionCancellation.Token);
+                                    if (connection == null)
+                                    {
+                                        lastError =
+                                            "Device does not support Bluetooth audio playback";
+                                        break;
+                                    }
+
+                                    continue;
+                                }
+
                                 lock (sync)
                                 {
                                     EnsureSessionIsCurrentLocked(sessionId);
@@ -403,9 +466,37 @@ namespace BetterBluetoothAudioConnector.Services
                         anonymousDeviceId,
                         null,
                         correlationId));
+
+                    bool released = await ReleaseAttemptConnectionAsync(
+                        connection,
+                        "retrying with a fresh connection",
+                        sessionCancellation.Token);
+                    connection = null;
+                    if (!released)
+                    {
+                        finalFailureWasTimeout = true;
+                        lastError = "Previous Windows Bluetooth operation is still finishing";
+                        break;
+                    }
+
+                    await WaitForReconnectCooldownAsync(
+                        deviceId,
+                        sessionCancellation.Token);
                     await Task.Delay(
                         connectionPolicy.GetRetryDelay(attempt),
                         sessionCancellation.Token);
+
+                    connection = await GetOrCreateEnabledConnectionAsync(
+                        deviceId,
+                        anonymousDeviceId,
+                        correlationId,
+                        sessionId,
+                        sessionCancellation.Token);
+                    if (connection == null)
+                    {
+                        lastError = "Device does not support Bluetooth audio playback";
+                        break;
+                    }
                 }
 
                 EnsureSessionIsCurrent(sessionId);
@@ -413,6 +504,14 @@ namespace BetterBluetoothAudioConnector.Services
                 {
                     desiredConnection = false;
                     activeConnection = null;
+                }
+                if (connection != null)
+                {
+                    await ReleaseAttemptConnectionAsync(
+                        connection,
+                        "connection session failed",
+                        CancellationToken.None);
+                    connection = null;
                 }
                 PublishConnection(new ConnectionSnapshot(
                     finalFailureWasTimeout
@@ -449,6 +548,12 @@ namespace BetterBluetoothAudioConnector.Services
                 {
                     desiredConnection = false;
                 }
+                if (connection != null)
+                {
+                    DetachConnection(connection);
+                    _ = DisposeAfterDrainAsync(connection, "connection canceled");
+                    connection = null;
+                }
                 if (IsSessionCurrent(sessionId))
                 {
                     PublishConnection(new ConnectionSnapshot(
@@ -477,6 +582,12 @@ namespace BetterBluetoothAudioConnector.Services
                 {
                     desiredConnection = false;
                     activeConnection = null;
+                }
+                if (connection != null)
+                {
+                    DetachConnection(connection);
+                    _ = DisposeAfterDrainAsync(connection, "connection session failed");
+                    connection = null;
                 }
                 logger.Log(
                     DiagnosticLevel.Error,
@@ -669,8 +780,51 @@ namespace BetterBluetoothAudioConnector.Services
             CancellationToken cancellationToken = default)
         {
             await DisconnectAsync(cancellationToken);
-            await Task.Delay(connectionPolicy.RetryDelay, cancellationToken);
-            await ConnectAsync(deviceId, cancellationToken);
+            await WaitForReconnectCooldownAsync(deviceId, cancellationToken);
+            await ConnectCoreAsync(deviceId, false, cancellationToken);
+        }
+
+        private async Task WaitForReconnectCooldownAsync(
+            string deviceId,
+            CancellationToken cancellationToken)
+        {
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            bool disconnectObserved = GetDevice(deviceId)?.IsSystemConnected != true;
+
+            while (!disconnectObserved &&
+                   stopwatch.Elapsed < connectionPolicy.ReconnectDisconnectTimeout)
+            {
+                TimeSpan remaining =
+                    connectionPolicy.ReconnectDisconnectTimeout - stopwatch.Elapsed;
+                await Task.Delay(
+                    remaining < TimeSpan.FromMilliseconds(100)
+                        ? remaining
+                        : TimeSpan.FromMilliseconds(100),
+                    cancellationToken);
+                disconnectObserved = GetDevice(deviceId)?.IsSystemConnected != true;
+            }
+
+            TimeSpan minimumDelayRemaining =
+                connectionPolicy.ReconnectMinimumDelay - stopwatch.Elapsed;
+            if (minimumDelayRemaining > TimeSpan.Zero)
+            {
+                await Task.Delay(minimumDelayRemaining, cancellationToken);
+            }
+
+            logger.Log(
+                disconnectObserved
+                    ? DiagnosticLevel.Information
+                    : DiagnosticLevel.Warning,
+                "Connection.ReconnectCooldownCompleted",
+                disconnectObserved
+                    ? null
+                    : "Windows did not report a full disconnect before reconnect",
+                fields: new[]
+                {
+                    ("device", (object)logger.GetAnonymousDeviceId(deviceId)),
+                    ("disconnectObserved", disconnectObserved),
+                    ("durationMs", stopwatch.ElapsedMilliseconds)
+                });
         }
 
         public void Dispose()
@@ -1251,14 +1405,6 @@ namespace BetterBluetoothAudioConnector.Services
             lock (sync)
             {
                 existing = enabledConnection;
-                if (existing != null &&
-                    existing.DeviceId == deviceId &&
-                    Volatile.Read(ref existing.Disposed) == 0)
-                {
-                    existing.BeginSession(sessionId, correlationId);
-                    return existing;
-                }
-
                 enabledConnection = null;
                 activeConnection = null;
             }
@@ -1340,6 +1486,55 @@ namespace BetterBluetoothAudioConnector.Services
 
                 _ = DisposeAfterDrainAsync(connection, "enable failed");
                 throw;
+            }
+        }
+
+        private async Task<bool> ReleaseAttemptConnectionAsync(
+            ConnectionHandle connection,
+            string reason,
+            CancellationToken cancellationToken)
+        {
+            if (connection == null)
+            {
+                return true;
+            }
+
+            DetachConnection(connection);
+            Task drain = GetConnectionDrainTask(connection);
+            bool drained = await WaitForTaskOrTimeoutAsync(
+                drain,
+                connectionPolicy.OperationDrainTimeout,
+                cancellationToken);
+            if (!drained)
+            {
+                _ = DisposeAfterDrainAsync(connection, reason);
+                return false;
+            }
+
+            await Task.Run(
+                () => SafeDisposeConnection(connection, reason),
+                CancellationToken.None);
+            return true;
+        }
+
+        private void DetachConnection(ConnectionHandle connection)
+        {
+            lock (sync)
+            {
+                if (pendingConnection == connection)
+                {
+                    pendingConnection = null;
+                }
+
+                if (activeConnection == connection)
+                {
+                    activeConnection = null;
+                }
+
+                if (enabledConnection == connection)
+                {
+                    enabledConnection = null;
+                }
             }
         }
 
@@ -1758,6 +1953,10 @@ namespace BetterBluetoothAudioConnector.Services
                 }
 
                 activeConnection = null;
+                if (enabledConnection == connection)
+                {
+                    enabledConnection = null;
+                }
             }
 
             PublishConnection(new ConnectionSnapshot(
@@ -1770,6 +1969,7 @@ namespace BetterBluetoothAudioConnector.Services
                 null,
                 connection.CorrelationId));
             PublishDevices();
+            _ = DisposeAfterDrainAsync(connection, "native state closed");
             ScheduleAutomaticRecovery(connection.DeviceId);
         }
 
@@ -1817,7 +2017,7 @@ namespace BetterBluetoothAudioConnector.Services
                         }
                     }
 
-                    await ConnectAsync(deviceId);
+                    await ConnectCoreAsync(deviceId, false, CancellationToken.None);
                 }
                 catch (OperationCanceledException)
                 {

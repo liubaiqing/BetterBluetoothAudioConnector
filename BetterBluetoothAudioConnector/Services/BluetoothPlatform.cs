@@ -146,7 +146,10 @@ namespace BetterBluetoothAudioConnector.Services
             TimeSpan.FromSeconds(1),
             3,
             TimeSpan.FromSeconds(20),
-            TimeSpan.FromMilliseconds(350));
+            TimeSpan.FromMilliseconds(350),
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(5),
+            true);
 
         public ConnectionPolicy(
             TimeSpan startTimeout,
@@ -154,7 +157,10 @@ namespace BetterBluetoothAudioConnector.Services
             TimeSpan retryDelay,
             int maximumAttempts,
             TimeSpan? operationDrainTimeout = null,
-            TimeSpan? openStabilityDelay = null)
+            TimeSpan? openStabilityDelay = null,
+            TimeSpan? reconnectMinimumDelay = null,
+            TimeSpan? reconnectDisconnectTimeout = null,
+            bool stabilizeInitialConnection = false)
         {
             StartTimeout = startTimeout;
             OpenTimeout = openTimeout;
@@ -162,6 +168,10 @@ namespace BetterBluetoothAudioConnector.Services
             MaximumAttempts = maximumAttempts;
             OperationDrainTimeout = operationDrainTimeout ?? TimeSpan.FromSeconds(15);
             OpenStabilityDelay = openStabilityDelay ?? TimeSpan.FromMilliseconds(100);
+            ReconnectMinimumDelay = reconnectMinimumDelay ?? TimeSpan.FromSeconds(2);
+            ReconnectDisconnectTimeout = reconnectDisconnectTimeout ??
+                TimeSpan.FromSeconds(5);
+            StabilizeInitialConnection = stabilizeInitialConnection;
         }
 
         public TimeSpan StartTimeout { get; }
@@ -175,6 +185,12 @@ namespace BetterBluetoothAudioConnector.Services
         public TimeSpan OperationDrainTimeout { get; }
 
         public TimeSpan OpenStabilityDelay { get; }
+
+        public TimeSpan ReconnectMinimumDelay { get; }
+
+        public TimeSpan ReconnectDisconnectTimeout { get; }
+
+        public bool StabilizeInitialConnection { get; }
 
         public TimeSpan GetRetryDelay(int completedAttempt)
         {
